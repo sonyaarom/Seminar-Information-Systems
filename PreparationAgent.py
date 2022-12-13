@@ -105,6 +105,7 @@ class Preparation_Agent():
     
     def plot_consumption(self, df, features='all', figsize='default', threshold=None, title='Consumption'):
         df = df.copy()
+        import matplotlib.pyplot as plt
         features = [column for column in df.columns if column not in ['Unix', 'Issues']] if features == 'all' else features
         fig, ax = plt.subplots(figsize=figsize) if figsize != 'default' else plt.subplots()
         if threshold != None:
@@ -226,7 +227,7 @@ class Preparation_Agent():
         import pandas as pd
         helper = Helper()
         
-        df  = self.unpacking_attributes(prep.input)
+        df  = self.unpacking_attributes(self.input)
         df = self.access_w(df)
         
         df = df.copy()
@@ -250,6 +251,10 @@ class Preparation_Agent():
         for device in params['shiftable_devices']:
             df[str(device) + '_usage'] = self.get_device_usage(scaled, device, **params['device'])
             output[device] = df.apply(lambda timestamp: timestamp[device] * timestamp[str(device) + '_usage'], axis = 1)
+
+        output = output.fillna(0)
+        df = df.fillna(0)
+        scaled = scaled.fillna(0)
 
         return output, scaled, df
     #pipeline usage
