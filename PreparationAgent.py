@@ -305,6 +305,8 @@ class Preparation_Agent():
 
         # dummy coding
         output = pd.get_dummies(output, drop_first=True)
+
+        output = output.fillna(0)
         return output
 
     #pipeline activity
