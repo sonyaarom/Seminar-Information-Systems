@@ -56,9 +56,15 @@ class Helper:
         house.set_index(pd.DatetimeIndex(house['Time']), inplace=True)
         return house
 
-
     def aggregate(self, df, resample_param):
         return df.resample(resample_param).mean().copy()
+
+    def aggregate_load(self, df, resample_param = '60T'):
+        import numpy as np
+        output = df.copy()
+        output = output.resample(resample_param).mean()
+        output = output.replace(np.nan, 0)
+        return output
 
 
     def plot_consumption(self, df, features='all', figsize='default', threshold=None, title='Consumption'):
@@ -77,23 +83,23 @@ class Helper:
         ax.set_title(title);
 
     def create_day_ahead_prices_df(self, FILE_PATH, filename):
-      import pandas as pd
-      electricity_prices1 = pd.read_csv(FILE_PATH + filename)
-      electricity_prices1["MTU (UTC)"] = electricity_prices1["MTU (UTC)"].str.split(pat = "-", n = 0).str[0]
-      electricity_prices1["MTU (UTC)"] = electricity_prices1["MTU (UTC)"].str.replace("2015", "2013")
+        import pandas as pd
+        electricity_prices1 = pd.read_csv(FILE_PATH + filename)
+        electricity_prices1["MTU (UTC)"] = electricity_prices1["MTU (UTC)"].str.split(pat = "-", n = 0).str[0]
+        electricity_prices1["MTU (UTC)"] = electricity_prices1["MTU (UTC)"].str.replace("2015", "2013")
 
-      electricity_prices2 = pd.read_csv(FILE_PATH + filename)
-      electricity_prices2["MTU (UTC)"] = electricity_prices2["MTU (UTC)"].str.split(pat = "-", n = 0).str[0]
-      electricity_prices2["MTU (UTC)"] = electricity_prices2["MTU (UTC)"].str.replace("2015", "2014")
+        electricity_prices2 = pd.read_csv(FILE_PATH + filename)
+        electricity_prices2["MTU (UTC)"] = electricity_prices2["MTU (UTC)"].str.split(pat = "-", n = 0).str[0]
+        electricity_prices2["MTU (UTC)"] = electricity_prices2["MTU (UTC)"].str.replace("2015", "2014")
 
-      electricity_prices3 = pd.read_csv(FILE_PATH + filename)
-      electricity_prices3["MTU (UTC)"] =  electricity_prices3["MTU (UTC)"].str.split(pat = "-", n = 0).str[0]
+        electricity_prices3 = pd.read_csv(FILE_PATH + filename)
+        electricity_prices3["MTU (UTC)"] =  electricity_prices3["MTU (UTC)"].str.split(pat = "-", n = 0).str[0]
 
-      electricity_prices = pd.concat([electricity_prices1, electricity_prices2, electricity_prices3])
-      electricity_prices.columns = ["Time", "Price"]
-      electricity_prices = electricity_prices.set_index(pd.DatetimeIndex(electricity_prices['Time']), drop = True)
-      electricity_prices = electricity_prices["Price"]
-      return electricity_prices
+        electricity_prices = pd.concat([electricity_prices1, electricity_prices2, electricity_prices3])
+        electricity_prices.columns = ["Time", "Price"]
+        electricity_prices = electricity_prices.set_index(pd.DatetimeIndex(electricity_prices['Time']), drop = True)
+        electricity_prices = electricity_prices["Price"]
+        return electricity_prices
     
     
     
@@ -128,3 +134,32 @@ class Helper:
         legend_shiftable_devices.columns.name = 'device'
         legend_shiftable_devices.index.name = 'household'
         return legend_shiftable_devices
+    
+    
+    def export_sql(self, file):
+        import sqlite3
+        import pandas as pd  
+        with sqlite3.connect(file) as con:
+            cur = con.cursor()
+            cur.execute("SELECT * FROM states")
+            states = cur.fetchall()
+        from_states_db = []
+        for result in states:
+            result = list(result)
+            from_states_db.append(result)
+        columns = ["state_id","entity_id","state","attributes","event_id","last_changed","last_updated","old_state_id","attributes_id","context_id","context_user_id","context_parent_id","origin_idx"]
+        states_df = pd.DataFrame(from_states_db, columns = columns)
+
+        with sqlite3.connect(file) as con:
+            cur = con.cursor()
+            cur.execute("SELECT * FROM state_attributes")
+            state_attributes = cur.fetchall()
+        from_state_attributes_db = []
+        for result in state_attributes:
+            result = list(result)
+            from_state_attributes_db.append(result)
+        columns = ["attributes_id","hash","shared_attributes"]
+        state_attributes_df = pd.DataFrame(from_state_attributes_db, columns = columns)
+
+        output = pd.merge(states_df, state_attributes_df, how= "left", on = 'attributes_id')
+        return output

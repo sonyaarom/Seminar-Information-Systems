@@ -22,12 +22,15 @@ from interpret.glassbox.ebm.ebm import ExplainableBoostingClassifier
 ###################################################################################################
 # preparation agent ###############################################################################
 ###################################################################################################
-class Preparation_Agent():
+class Preparation_Agent:
 #installing dependencies
     import pandas as pd
     #uploading data and simple data wrangling
-    def __init__(self, REFIT_df):
-        self.input = REFIT_df
+    def __init__(self, dbfile, shiftable_devices):
+        from helper_functions import Helper
+        helper = Helper()
+        self.input = helper.export_sql(dbfile)
+        self.shiftable_devices = shiftable_devices
 
     def unpacking_attributes(self, df):
         import pandas as pd
@@ -42,22 +45,24 @@ class Preparation_Agent():
         result = result.dropna(axis = 1, thresh=int(0.95*(len(result.columns))))
         return result
 
-    def access_w(self, df, attrs= 'all'):
+    def access_shiftable_devices(self, df, attrs= 'all'):
         import pandas as pd
         trial = df.copy()
         trial.attributes_id = trial.attributes_id.dropna()
         trial.state= pd.to_numeric(trial['state'], errors='coerce').dropna()
         if attrs == 'all':
             w_data = trial[trial.unit_of_measurement.isin(['W'])]
-            #we can add entity_id, or disregard
-            w_data_long = w_data[['attributes_id','last_updated','state']]
-            w_data_wide = pd.pivot(w_data_long,  index = ['last_updated'], columns = 'attributes_id', values = 'state')
+            w_data = trial[trial.entity_id.isin(self.shiftable_devices)]
+            w_data_long = w_data[['entity_id','last_updated','state']]
+            w_data_wide = pd.pivot(w_data_long,  index = ['last_updated'], columns = 'entity_id', values = 'state')
         if attrs != 'all':
             w_data = trial[trial.unit_of_measurement.isin(['W']) & trial.attributes_id.isin([attrs])]
-            w_data_long = w_data[['attributes_id','last_updated','state']]
-            w_data_wide = pd.pivot(w_data_long,  index = ['last_updated'], columns = 'attributes_id', values = 'state')
+            w_data = trial[trial.entity_id.isin(self.shiftable_devices)]
+            w_data_long = w_data[['entity_id','last_updated','state']]
+            w_data_wide = pd.pivot(w_data_long,  index = ['last_updated'], columns = 'entity_id', values = 'state')
         result = w_data_wide.fillna(0).reset_index()
         return(result)
+    
     #basic preprocessing
     # -------------------------------------------------------------------------------------------
     def outlier_truncation(self, series, factor=1.5, verbose=0):
@@ -83,19 +88,16 @@ class Preparation_Agent():
                 output.append(item)
         print(f'[outlier truncation: {series.name}]: {counter} outliers were truncated.') if verbose != 0 else None 
         return output
-
-
     
-
     def scale(self, df, features='all', kind='MinMax', verbose=0):
         output = df.copy()
-        features = df.select_dtypes(include=['int', 'float']).columns if features == 'all' else features
+        features = output.select_dtypes(include=['int', 'float']).columns if features == 'all' else features
 
         if kind == 'MinMax':
             from sklearn.preprocessing import MinMaxScaler
             
             scaler = MinMaxScaler()
-            output[features] = scaler.fit_transform(df[features])
+            output[features] = scaler.fit_transform(output[features])
             print('[MinMaxScaler] Finished scaling the data.') if verbose != 0 else None
         else:
             raise InputError('Chosen scaling method is not available.')
@@ -107,12 +109,6 @@ class Preparation_Agent():
         start = pd.to_datetime(start) if type(start) != type(pd.to_datetime('1970-01-01')) else start 
         end = start + pd.Timedelta(**timedelta_params)
         return df[start:end].reset_index()
-    
-    def aggregate(self, df, period = '60T'):
-        output = df.copy()
-        output['last_updated'] = pd.to_datetime(output['last_updated'])
-        output = output.resample(period, on="last_updated").mean()
-        return output
     
     def truncate(self, df, features='all', factor=1.5, verbose=0):
         import time
@@ -129,7 +125,6 @@ class Preparation_Agent():
     
     def plot_consumption(self, df, features='all', figsize='default', threshold=None, title='Consumption'):
         df = df.copy()
-        import matplotlib.pyplot as plt
         features = [column for column in df.columns if column not in ['Unix', 'Issues']] if features == 'all' else features
         fig, ax = plt.subplots(figsize=figsize) if figsize != 'default' else plt.subplots()
         if threshold != None:
@@ -252,14 +247,17 @@ class Preparation_Agent():
         helper = Helper()
         
         df  = self.unpacking_attributes(self.input)
-        df = self.access_w(df)
+        df = self.access_shiftable_devices(df)
         
         df = df.copy()
         output = pd.DataFrame()
 
         # Data cleaning
-        df = self.truncate(df, **params['truncate'],)
-        scaled = self.scale(df, **params['scale'])
+        # df = self.truncate(df, **params['truncate'],)
+        # scaled = self.scale(df, **params['scale'])
+        # ignore scaling for now, we would just scale those variables, which does not make sense 
+        # Index(['state_id', 'old_state_id', 'attributes_id', 'origin_idx', 'hash'], dtype='object')
+        scaled = df.copy()
 
         df['last_updated'] = pd.to_datetime(df['last_updated'])
         df = df.set_index('last_updated')
@@ -268,17 +266,13 @@ class Preparation_Agent():
         scaled = scaled.set_index('last_updated')
 
         # aggregate
-        df = helper.aggregate(df, **params['aggregate'])
-        scaled = helper.aggregate(scaled, **params['aggregate'])
+        df = helper.aggregate_load(df, **params['aggregate'])
+        scaled = helper.aggregate_load(scaled, **params['aggregate'])
 
         # Get device usage and transform to energy consumption
         for device in params['shiftable_devices']:
-            df[str(device) + '_usage'] = self.get_device_usage(scaled, device, **params['device'])
+            df[str(device) + '_usage'] = self.get_device_usage(df, device, **params['device'])
             output[device] = df.apply(lambda timestamp: timestamp[device] * timestamp[str(device) + '_usage'], axis = 1)
-
-        output = output.fillna(0)
-        df = df.fillna(0)
-        scaled = scaled.fillna(0)
 
         return output, scaled, df
     #pipeline usage
@@ -289,22 +283,25 @@ class Preparation_Agent():
         helper = Helper()
 
         df  = self.unpacking_attributes(self.input)
-        df = self.access_w(df)
+        df = self.access_shiftable_devices(df)
         
         df = df.copy()
         output = pd.DataFrame()
 
         # Data cleaning
-        df = self.truncate(df, **params['truncate'],)
-        scaled = self.scale(df, **params['scale'])
+        # df = self.truncate(df, **params['truncate'],)
+        # scaled = self.scale(df, **params['scale'])
+        # ignore scaling for now, we would just scale those variables, which does not make sense 
+        # Index(['state_id', 'old_state_id', 'attributes_id', 'origin_idx', 'hash'], dtype='object')
+        scaled = df.copy()
         
-        #df['last_updated'] = pd.to_datetime(df['last_updated'])
-        #df = df.set_index('last_updated')
+        # df['last_updated'] = pd.to_datetime(df['last_updated'])
+        # df = df.set_index('last_updated')
         scaled['last_updated'] = pd.to_datetime(scaled['last_updated'])
         scaled = scaled.set_index('last_updated')
         
         # Aggregate to hour level
-        scaled = helper.aggregate(scaled, **params['aggregate_hour'])
+        scaled = helper.aggregate_load(scaled, **params['aggregate_hour'])
 
         # Activity feature
         output['activity'] = self.get_activity(scaled, **params['activity'])
@@ -329,8 +326,6 @@ class Preparation_Agent():
 
         # dummy coding
         output = pd.get_dummies(output, drop_first=True)
-
-        output = output.fillna(0)
         return output
 
     #pipeline activity
@@ -343,15 +338,17 @@ class Preparation_Agent():
         output = pd.DataFrame()
 
         df  = self.unpacking_attributes(self.input)
-        df = self.access_w(df)
+        df = self.access_shiftable_devices(df)
         # Data cleaning
-        df = self.truncate(df, **params['truncate'],)
-        df = self.scale(df, **params['scale'])
+        # df = self.truncate(df, **params['truncate'],)
+        # df = self.scale(df, **params['scale'])
+        # ignore scaling for now, we would just scale those variables, which does not make sense 
+        # Index(['state_id', 'old_state_id', 'attributes_id', 'origin_idx', 'hash'], dtype='object')
 
         df['last_updated'] = pd.to_datetime(df['last_updated'])
         df = df.set_index('last_updated')
         # Aggregate to hour level
-        df = helper.aggregate(df, **params['aggregate'])
+        df = helper.aggregate_load(df, **params['aggregate'])
 
         # Activity feature
         output['activity'] = self.get_activity(df, **params['activity'])
@@ -367,6 +364,7 @@ class Preparation_Agent():
 
         return output
 
+
 ###################################################################################################
 # usage agent #####################################################################################
 ###################################################################################################
@@ -379,11 +377,24 @@ class Usage_Agent:
 
     # train test split
     # -------------------------------------------------------------------------------------------
-    def train_test_split(self, df, date, train_start="2013-11-01"):
+    
+    #train start: the day from which training starts
+    def get_train_start(self, df):
+        import datetime
+        end_date = min(df.index) + datetime.timedelta(days=3)
+        # determine train_start date 
+        return str(end_date)[:10]
+    
+    def train_test_split(self, df, date, train_start=''):
+        if train_start == '':
+            train_start = self.get_train_start(df)
+        
         select_vars =  [str(self.device) + '_usage', 
                         str(self.device)+ '_usage_lag_1', 
                         str(self.device)+ '_usage_lag_2', 'active_last_2_days']
         
+
+            
         # Add weather possibly
         if "temp" in df.columns:
             select_vars.append("temp")
@@ -411,24 +422,31 @@ class Usage_Agent:
     # model training and evaluation
     # -------------------------------------------------------------------------------------------
     def fit_Logit(self, X, y, max_iter=100):
+        from sklearn.linear_model import LogisticRegression
         return LogisticRegression(random_state=0, max_iter=max_iter).fit(X, y)
 
     def fit_knn(self, X, y, n_neighbors=10, leaf_size=30):
+        from sklearn.neighbors import KNeighborsClassifier
         return KNeighborsClassifier(n_neighbors=n_neighbors, leaf_size=leaf_size, algorithm="auto", n_jobs=-1).fit(X, y)
 
     def fit_random_forest(self, X, y, max_depth=10, n_estimators=500, max_features="sqrt"):
+        from sklearn.ensemble import RandomForestClassifier
         return RandomForestClassifier(max_depth=max_depth, n_estimators=n_estimators, max_features=max_features, n_jobs=-1).fit(X, y)
 
     def fit_ADA(self, X, y, learning_rate=0.1, n_estimators=100):
+        from sklearn.ensemble import AdaBoostClassifier
         return AdaBoostClassifier(learning_rate=learning_rate, n_estimators=n_estimators).fit(X, y)
 
     def fit_XGB(self, X, y, learning_rate=0.1, max_depth=6, reg_lambda=1, reg_alpha=0):
+        import xgboost
         return xgboost.XGBClassifier(verbosity=0, use_label_encoder=False, learning_rate=learning_rate, max_depth=max_depth, reg_lambda=reg_lambda, reg_alpha=reg_alpha).fit(X, y)
 
     def fit_EBM(self, X, y): 
+        from interpret.glassbox.ebm.ebm import ExplainableBoostingClassifier  
         return ExplainableBoostingClassifier().fit(X,y)
 
     def fit_smLogit(self, X, y):
+        import statsmodels
         return statsmodels.api.Logit(y, X).fit(disp=False)
     
     def fit(self, X, y, model_type, **args):
@@ -452,6 +470,16 @@ class Usage_Agent:
         return model
 
     def predict(self, model, X):
+        import sklearn
+        import statsmodels
+        from interpret.glassbox.ebm.ebm import ExplainableBoostingClassifier     
+        from sklearn.linear_model import LogisticRegression
+        from sklearn.neighbors import KNeighborsClassifier
+        from sklearn.ensemble import RandomForestClassifier
+        from sklearn.ensemble import AdaBoostClassifier
+        import xgboost
+        import numpy as np
+        import pandas
         res = 3
         cols = ["temp", "dwpt", "rhum", "wdir", "wspd"]
         for e in cols:
@@ -482,14 +510,10 @@ class Usage_Agent:
 
     def auc(self, y_true, y_hat):
         import sklearn.metrics
-        # if only one class, auc is not defined
-        if len(y_test.unique())==1:
-            return 1
-        else:
-            return sklearn.metrics.roc_auc_score(y_true, y_hat)
+        return sklearn.metrics.roc_auc_score(y_true, y_hat)
     
     def evaluate(
-            self, df, model_type, train_start, predict_start="2014-01-01", predict_end=-1, return_errors=False,
+            self, df, model_type, train_start = '', predict_start="2014-01-01", predict_end=-1, return_errors=False,
             weather_sel=False, xai=False, **args
     ):
         import pandas as pd
@@ -694,7 +718,7 @@ class Usage_Agent:
         
     # pipeline function: predicting device usage
     # -------------------------------------------------------------------------------------------
-    def pipeline(self, df, date, model_type, train_start, weather_sel=False):
+    def pipeline(self, df, date, model_type, train_start = '', weather_sel=False):
 
         if weather_sel:
             # Add Weather
@@ -741,7 +765,7 @@ class Usage_Agent:
 
     # pipeline function: predicting device usage
     # -------------------------------------------------------------------------------------------
-    def pipeline_xai(self, df, date, model_type, train_start, weather_sel=False):
+    def pipeline_xai(self, df, date, model_type, train_start = '', weather_sel=False):
 
         if weather_sel:
             # Add Weather
@@ -784,7 +808,6 @@ class Usage_Agent:
         X_train, y_train, X_test, y_test = self.train_test_split(df, date, train_start)
         model = self.fit(X_train, y_train, model_type)
         return self.predict(model, X_test), X_train, X_test, model
-
     
 ###################################################################################################
 # load agent ######################################################################################
@@ -808,6 +831,9 @@ class Load_Agent:
             df = df[start_date:end_date]
         else:
             df = df[:end_date]
+        
+        if end_date not in df:
+            return df
 
         if len(df.loc[end_date]) < 24:
             end_new = (pd.to_datetime(end_date) - pd.Timedelta(days=1)).strftime(
@@ -1005,8 +1031,17 @@ class Activity_Agent:
             start = pd.to_datetime(start)
         end = pd.to_datetime(date) + pd.Timedelta(seconds=-1)
         return df.loc[start:end, target]
+    
+    #train start: the day from which training starts
+    def get_train_start(self, df):
+        import datetime
+        end_date = min(df.index) + datetime.timedelta(days=3)
+        # determine train_start date 
+        return str(end_date)[:10]
 
     def train_test_split(self, df, date, train_start=-30, test_delta='all', target='activity'):
+        if train_start == '':
+            train_start = self.get_train_start(df)
         X_train = self.get_Xtrain(df, date, start=train_start, target=target)
         y_train = self.get_ytrain(df, date, start=train_start, target=target)
         X_test = self.get_Xtest(df, date, time_delta=test_delta, target=target)
@@ -1449,3 +1484,196 @@ class Price_Agent():
         range = pd.date_range(start=date, freq="H", periods=48)
         df = df.loc[range]
         return df
+    
+    
+    
+###################################################################################################
+# recommendation agent ############################################################################
+###################################################################################################    
+# The Original Recommendation Agent
+# ===============================================================================================
+class Recommendation_Agent:
+    def __init__(
+        self, activity_input, usage_input, load_input, price_input, shiftable_devices, model_type = 'random forest'):
+        self.activity_input = activity_input
+        self.usage_input = usage_input
+        self.load_input = load_input
+        self.price_input = price_input
+        self.shiftable_devices = shiftable_devices
+        self.Activity_Agent = Activity_Agent(activity_input)
+        # create dictionary with Usage_Agent for each device
+        self.Usage_Agent = {
+            name: Usage_Agent(usage_input, name) for name in shiftable_devices
+        }
+        self.Load_Agent = Load_Agent(load_input)
+        self.Price_Agent = Price_Agent()
+        self.model_type = model_type
+
+    # calculating costs
+    # -------------------------------------------------------------------------------------------
+    def electricity_prices_from_start_time(self, date):
+        import pandas as pd
+
+        prices_48 = self.Price_Agent.return_day_ahead_prices(date)
+        prices_from_start_time = pd.DataFrame()
+        for i in range(24):
+            prices_from_start_time["Price_at_H+" + str(i)] = prices_48.shift(-i)
+        # delete last 24 hours
+        prices_from_start_time = prices_from_start_time[:-24]
+        return prices_from_start_time
+
+    def cost_by_starting_time(self, date, device, evaluation=False):
+        import numpy as np
+        import pandas as pd
+
+        # get electriciy prices following every device starting hour with previously defined function
+        prices = self.electricity_prices_from_start_time(date)
+        # build up table with typical load profile repeated for every hour (see Load_Agent)
+        if not evaluation:
+            device_load = self.Load_Agent.pipeline(
+                self.load_input, date, self.shiftable_devices
+            ).loc[device]
+        else:
+            # get device load for one date
+            device_load = evaluation["load"][date].loc[device]
+        device_load = pd.concat([device_load] * 24, axis=1)
+        # multiply both tables and aggregate costs for each starting hour
+        costs = np.array(prices) * np.array(device_load)
+        costs = np.sum(costs, axis=0)
+        # return an array of size 24 containing the total cost at each staring hour.
+        return costs
+
+    # creating recommendations
+    # -------------------------------------------------------------------------------------------
+    def recommend_by_device(
+        self,
+        date,
+        device,
+        activity_prob_threshold,
+        usage_prob_threshold,
+        evaluation=False,
+        weather_sel=False
+    ):
+        import numpy as np
+
+        # add split params as input
+        # IN PARTICULAR --> Specify date to start training
+        split_params = {
+            "train_start": "",
+            "test_delta": {"days": 1, "seconds": -1},
+            "target": "activity",
+        }
+        # compute costs by launching time:
+        costs = self.cost_by_starting_time(date, device, evaluation=evaluation)
+        # compute activity probabilities
+        if not evaluation:
+            if weather_sel:
+                activity_probs = self.Activity_Agent.pipeline(self.activity_input, date, self.model_type, split_params, weather_sel=True)
+            else:
+                activity_probs = self.Activity_Agent.pipeline(self.activity_input, date, self.model_type, split_params)
+        else:
+            # get activity probs for date
+            activity_probs = evaluation["activity"][date]
+
+        # set values above threshold to 1. Values below to Inf
+        # (vector will be multiplied by costs, so that hours of little activity likelihood get cost = Inf)
+        activity_probs = np.where(activity_probs >= activity_prob_threshold, 1, float("Inf"))
+
+        # add a flag in case all hours have likelihood smaller than threshold
+        no_recommend_flag_activity = 0
+        if np.min(activity_probs) == float("Inf"):
+            no_recommend_flag_activity = 1
+
+        # compute cheapest hour from likely ones
+        best_hour = np.argmin(np.array(costs) * np.array(activity_probs))
+
+        # compute likelihood of usage:
+        if not evaluation:
+            usage_prob = self.Usage_Agent[device].pipeline(self.usage_input, date, self.model_type, split_params["train_start"])
+        else:
+            # get usage probs
+            name = ("usage_" + device.replace(" ", "_").replace("(", "").replace(")", "").lower())
+            usage_prob = evaluation[name][date]
+
+
+        no_recommend_flag_usage = 0
+        if usage_prob < usage_prob_threshold:
+            no_recommend_flag_usage = 1
+
+        return {
+            "recommendation_date": [date],
+            "device": [device],
+            "best_launch_hour": [best_hour],
+            "no_recommend_flag_activity": [no_recommend_flag_activity],
+            "no_recommend_flag_usage": [no_recommend_flag_usage],
+            "recommendation": [
+                best_hour
+                if (no_recommend_flag_activity == 0 and no_recommend_flag_usage == 0)
+                else np.nan
+            ],
+        }
+
+
+    def visualize_recommendation_by_device(self, dict):
+        import datetime
+        recommendation_date = str(dict['recommendation_date'][0])
+        recommendation_date = datetime.datetime.strptime(recommendation_date, '%Y-%m-%d')
+        best_launch_hour = dict['best_launch_hour'][0]
+        recommendation_date = recommendation_date.replace(hour=best_launch_hour)
+        recommendation_date = recommendation_date.strftime(format = "%d.%m.%Y %H:%M")
+        device = dict['device'][0]
+        if (dict['no_recommend_flag_activity'][0]== 0 and dict['no_recommend_flag_usage'][0]==0) == True:
+            return print('You have one recommendation for the following device: ' + str(device) + '\nPlease use it on ' + recommendation_date[0:10] + ' at '+ recommendation_date[11:]+'.')
+
+    # pipeline function: create recommendations
+    # -------------------------------------------------------------------------------------------
+    def pipeline(self, date, activity_prob_threshold, usage_prob_threshold, evaluation=False, weather_sel=False):
+        import pandas as pd
+
+        recommendations_by_device = self.recommend_by_device(
+            date,
+            self.shiftable_devices[0],
+            activity_prob_threshold,
+            usage_prob_threshold,
+            evaluation=evaluation,
+        )
+        recommendations_table = pd.DataFrame.from_dict(recommendations_by_device)
+
+        for device in self.shiftable_devices[1:]:
+            if weather_sel:
+                recommendations_by_device = self.recommend_by_device(
+                    date,
+                    device,
+                    activity_prob_threshold,
+                    usage_prob_threshold,
+                    evaluation=evaluation,
+                    weather_sel=True
+                )
+            else:
+                recommendations_by_device = self.recommend_by_device(
+                    date,
+                    device,
+                    activity_prob_threshold,
+                    usage_prob_threshold,
+                    evaluation=evaluation,
+                )
+            recommendations_table = recommendations_table.append(
+                pd.DataFrame.from_dict(recommendations_by_device)
+            )
+        return recommendations_table
+
+    def visualize_recommendation(self, recommendations_table, price):
+        import datetime
+        for i in range(len(recommendations_table)):
+            date_and_time = recommendations_table.recommendation_date.iloc[i] + ':' + str(recommendations_table.best_launch_hour.iloc[i])
+
+            date_and_time = datetime.datetime.strptime(date_and_time, '%Y-%m-%d:%H')
+
+            date_and_time_show = date_and_time.strftime(format = "%d.%m.%Y %H:%M")
+            date_and_time_price = date_and_time.strftime(format = "%Y-%m-%d %H:%M:%S")
+            price = price.filter(like=date_and_time_price, axis=0)['Price_at_H+0'].iloc[0]
+            output = print('You have a recommendation for the following device: ' + str(recommendations_table.device.iloc[i]) + '\n\nPlease use the device on the ' + date_and_time_show[0:10] + ' at ' + date_and_time_show[11:] + ' oclock because it costs you only ' + str(price) + ' €.\n')
+            if (recommendations_table.no_recommend_flag_activity.iloc[i]==0 and recommendations_table.no_recommend_flag_usage.iloc[i]==0) == True:
+                return output
+            else:
+                return
