@@ -1,0 +1,19 @@
+---
+name: "recsys"
+description: "Recommendation Integration for Home Assistant"
+version: "1.0.0"
+slug: "recsys"
+init: false
+arch:
+  - aarch64
+  - amd64
+  - armhf
+  - armv7
+  - i386
+   
+options:
+  active_appliances: "xxxxxx"
+  
+schema:
+  active_appliances: str
+  
