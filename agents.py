@@ -17,7 +17,8 @@ import statsmodels
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.ensemble import RandomForestClassifier, AdaBoostClassifier
 from sklearn.linear_model import LogisticRegression
-from interpret.glassbox.ebm.ebm import ExplainableBoostingClassifier   
+from interpret.glassbox.ebm.ebm import ExplainableBoostingClassifier
+import shap as shap
 
 ###################################################################################################
 # preparation agent ###############################################################################
@@ -121,6 +122,22 @@ class Preparation_Agent:
             output.loc[row_nn, feature] = self.outlier_truncation(df.loc[row_nn, feature], factor=factor, verbose=verbose) # Truncatation factor = 1.5 * IQR
             print('\n') if verbose != 0 else None
         return output
+    
+    def last_reported(self, df):
+        return str(df.index.max())[:10]
+    
+    def add_dummy_data_tomorrow(self, df):
+        date = self.last_reported(df)
+        tomorrow = (pd.to_datetime(date) + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+
+        # determine how many hours we need to fill up (missing hours till new day + 23 for tomorrow, day of prediction)
+        hours_to_fill = 24 - int(str(df.index.max())[11:13]) + 23
+
+        # add rows and fill up with dummy 0
+        for i in range(0,hours_to_fill):
+            idx = df.tail(1).index[0] + pd.Timedelta(hours=1)
+            df.loc[idx] = 0
+        return df
 
     
     def plot_consumption(self, df, features='all', figsize='default', threshold=None, title='Consumption'):
@@ -268,6 +285,10 @@ class Preparation_Agent:
         # aggregate
         df = helper.aggregate_load(df, **params['aggregate'])
         scaled = helper.aggregate_load(scaled, **params['aggregate'])
+        
+        # Add dummy data
+        df = self.add_dummy_data_tomorrow(df)
+        scaled = self.add_dummy_data_tomorrow(scaled)
 
         # Get device usage and transform to energy consumption
         for device in params['shiftable_devices']:
@@ -302,6 +323,10 @@ class Preparation_Agent:
         
         # Aggregate to hour level
         scaled = helper.aggregate_load(scaled, **params['aggregate_hour'])
+        
+        # Add dummy data
+        scaled = self.add_dummy_data_tomorrow(scaled)
+
 
         # Activity feature
         output['activity'] = self.get_activity(scaled, **params['activity'])
@@ -349,6 +374,9 @@ class Preparation_Agent:
         df = df.set_index('last_updated')
         # Aggregate to hour level
         df = helper.aggregate_load(df, **params['aggregate'])
+        
+        # Add dummy data
+        df = self.add_dummy_data_tomorrow(df)
 
         # Activity feature
         output['activity'] = self.get_activity(df, **params['activity'])
@@ -364,10 +392,6 @@ class Preparation_Agent:
 
         return output
 
-
-###################################################################################################
-# usage agent #####################################################################################
-###################################################################################################
 class Usage_Agent:
     import pandas as pd
 
@@ -381,42 +405,23 @@ class Usage_Agent:
     #train start: the day from which training starts
     def get_train_start(self, df):
         import datetime
-        end_date = min(df.index) + datetime.timedelta(days=3)
+        start_date = min(df.index) + datetime.timedelta(days=3)
         # determine train_start date 
-        return str(end_date)[:10]
+        return str(start_date)[:10]
     
-    def train_test_split(self, df, date, train_start=''):
+    def train_test_split(self, df, date, train_start = ''):
         if train_start == '':
             train_start = self.get_train_start(df)
-        
-        select_vars =  [str(self.device) + '_usage', 
-                        str(self.device)+ '_usage_lag_1', 
-                        str(self.device)+ '_usage_lag_2', 'active_last_2_days']
-        
 
-            
-        # Add weather possibly
-        if "temp" in df.columns:
-            select_vars.append("temp")
-            df["temp"].fillna(method="backfill", inplace=True)
-        if "dwpt" in df.columns:
-            select_vars.append("dwpt")
-            df["dwpt"].fillna(method="backfill", inplace=True)
-        if "rhum" in df.columns:
-            select_vars.append("rhum")
-            df["rhum"].fillna(method="backfill", inplace=True)
-        if "wdir" in df.columns:
-            select_vars.append("wdir")
-            df["wdir"].fillna(method="backfill", inplace=True)
-        if "wspd" in df.columns:
-            select_vars.append("wspd")
-            df["wspd"].fillna(method="backfill", inplace=True)
-        
+        #restrict number of variables
+        select_vars =  [str(self.device) + '_usage', str(self.device)+ '_usage_lag_1', str(self.device)+ '_usage_lag_2',	'active_last_2_days']
         df = df[select_vars]
-        X_train = df.loc[train_start:date, df.columns != str(self.device) + "_usage"]
-        y_train = df.loc[train_start:date, df.columns == str(self.device) + "_usage"]
-        X_test = df.loc[date, df.columns != str(self.device) + "_usage"]
-        y_test = df.loc[date, df.columns == str(self.device) + "_usage"]
+        #spli train and test
+        tomorrow = (pd.to_datetime(date) + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+        X_train = df.loc[train_start:date, df.columns != str(self.device) + '_usage']
+        y_train = df.loc[train_start:date, df.columns == str(self.device) + '_usage']
+        X_test  = df.loc[tomorrow, df.columns != str(self.device) + '_usage']
+        y_test  = df.loc[tomorrow , df.columns == str(self.device) + '_usage']
         return X_train, y_train, X_test, y_test
     
     # model training and evaluation
@@ -480,8 +485,8 @@ class Usage_Agent:
         import xgboost
         import numpy as np
         import pandas
-        res = 3
-        cols = ["temp", "dwpt", "rhum", "wdir", "wspd"]
+        res = 0
+        cols = X.index
         for e in cols:
             if isinstance(X, pd.DataFrame):
                 if e in X.columns:
@@ -506,6 +511,7 @@ class Usage_Agent:
             y_hat = model.predict(X)
         else:
             raise InputError("Unknown model type.")
+
         return y_hat
 
     def auc(self, y_true, y_hat):
@@ -832,7 +838,7 @@ class Load_Agent:
         else:
             df = df[:end_date]
         
-        if end_date not in df:
+        if end_date not in df.index:
             return df
 
         if len(df.loc[end_date]) < 24:
@@ -975,10 +981,11 @@ class Load_Agent:
         df_hours = self.load_profile_cleaned(df_hours)
         loads = self.load_profile(df_hours, shiftable_devices)
         return loads
+    
+###################################################################################################
+# Activity agent ##################################################################################
+###################################################################################################  
 
-###################################################################################################
-# activity agent ##################################################################################
-###################################################################################################
 class Activity_Agent:
     def __init__(self, activity_input_df):
         self.input = activity_input_df
@@ -990,11 +997,13 @@ class Activity_Agent:
         from helper_functions import Helper
 
         helper = Helper()
-        
+
+        tomorrow = (pd.to_datetime(date) + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+
         if time_delta == 'all':
-            output = df.loc[pd.to_datetime(date):, df.columns != target]
+            output = df.loc[pd.to_datetime(tomorrow):, df.columns != target]
         else:
-            df = helper.get_timespan(df, date, time_delta)
+            df = helper.get_timespan(df, tomorrow, time_delta)
             output = df.loc[:, df.columns != target]
         return output
 
@@ -1003,11 +1012,13 @@ class Activity_Agent:
         from helper_functions import Helper
 
         helper = Helper()
-        
+
+        tomorrow = (pd.to_datetime(date) + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+
         if time_delta == 'all':
-            output = df.loc[pd.to_datetime(date):, target]
+            output = df.loc[pd.to_datetime(tomorrow):, target]
         else:
-            output = helper.get_timespan(df, date, time_delta)[target]
+            output = helper.get_timespan(df, tomorrow, time_delta)[target]
         return output
 
     def get_Xtrain(self, df, date, start=-30, target='activity'):
@@ -1015,22 +1026,22 @@ class Activity_Agent:
 
         if type(start) == int:
             start = pd.to_datetime(date) + pd.Timedelta(days= start)
-            start = pd.to_datetime('2013-11-01') if start < pd.to_datetime('2013-11-01') else start
+            start = pd.to_datetime('2022-12-31') if start < pd.to_datetime('2022-12-31') else start
         else:
             start = pd.to_datetime(start)
-        end = pd.to_datetime(date) + pd.Timedelta(seconds=-1)
-        return df.loc[start:end, df.columns != target]
+
+        return df.loc[start:date, df.columns != target]
+
 
     def get_ytrain(self, df, date, start=-30, target='activity'):
         import pandas as pd
 
         if type(start) == int:
             start = pd.to_datetime(date) + pd.Timedelta(days= start)
-            start = pd.to_datetime('2013-11-01') if start < pd.to_datetime('2013-11-01') else start
+            start = pd.to_datetime('2022-12-31') if start < pd.to_datetime('2022-12-31') else start
         else:
             start = pd.to_datetime(start)
-        end = pd.to_datetime(date) + pd.Timedelta(seconds=-1)
-        return df.loc[start:end, target]
+        return df.loc[start:date, target]
     
     #train start: the day from which training starts
     def get_train_start(self, df):
@@ -1055,24 +1066,31 @@ class Activity_Agent:
     # model training and evaluation
     # -------------------------------------------------------------------------------------------
     def fit_Logit(self, X, y, max_iter=100):
+        from sklearn.linear_model import LogisticRegression
         return LogisticRegression(random_state=0, max_iter=max_iter).fit(X, y)
 
     def fit_knn(self, X, y, n_neighbors=10, leaf_size=30):
+        from sklearn.neighbors import KNeighborsClassifier
         return KNeighborsClassifier(n_neighbors=n_neighbors, leaf_size=leaf_size, algorithm="auto", n_jobs=-1).fit(X, y)
 
     def fit_random_forest(self, X, y, max_depth=10, n_estimators=500, max_features="sqrt"):
+        from sklearn.ensemble import RandomForestClassifier
         return RandomForestClassifier(max_depth=max_depth, n_estimators=n_estimators, max_features=max_features, n_jobs=-1).fit(X, y)
 
     def fit_ADA(self, X, y, learning_rate=0.1, n_estimators=100):
+        from sklearn.ensemble import AdaBoostClassifier
         return AdaBoostClassifier(learning_rate=learning_rate, n_estimators=n_estimators).fit(X, y)
 
     def fit_XGB(self, X, y, learning_rate=0.1, max_depth=6, reg_lambda=1, reg_alpha=0):
+        import xgboost
         return xgboost.XGBClassifier(verbosity=0, use_label_encoder=False, learning_rate=learning_rate, max_depth=max_depth, reg_lambda=reg_lambda, reg_alpha=reg_alpha).fit(X, y)
 
     def fit_EBM(self, X, y): 
+        from interpret.glassbox.ebm.ebm import ExplainableBoostingClassifier  
         return ExplainableBoostingClassifier().fit(X,y)
 
     def fit_smLogit(self, X, y):
+        import statsmodels
         return statsmodels.api.Logit(y, X).fit(disp=False)
     
     def fit(self, X, y, model_type, **args):
@@ -1096,6 +1114,14 @@ class Activity_Agent:
         return model
     
     def predict(self, model, X):
+        import sklearn
+        import statsmodels
+        from interpret.glassbox.ebm.ebm import ExplainableBoostingClassifier     
+        from sklearn.linear_model import LogisticRegression
+        from sklearn.neighbors import KNeighborsClassifier
+        from sklearn.ensemble import RandomForestClassifier
+        from sklearn.ensemble import AdaBoostClassifier
+        import xgboost
         if type(model) == sklearn.linear_model.LogisticRegression:
             y_hat = model.predict_proba(X)[:,1]
 
@@ -1126,7 +1152,10 @@ class Activity_Agent:
 
     def auc(self, y_true, y_hat):
         import sklearn.metrics
-        return sklearn.metrics.roc_auc_score(y_true, y_hat)
+        try:
+            return sklearn.metrics.roc_auc_score(y_true, y_hat)
+        except ValueError:
+            pass
     
     def plot_model_performance(self, auc_train, auc_test, ylim="default"):
         import matplotlib.pyplot as plt
@@ -1513,8 +1542,9 @@ class Recommendation_Agent:
     # -------------------------------------------------------------------------------------------
     def electricity_prices_from_start_time(self, date):
         import pandas as pd
+        tomorrow = (pd.to_datetime(date) + pd.Timedelta(days=1)).strftime("%Y-%m-%d") 
 
-        prices_48 = self.Price_Agent.return_day_ahead_prices(date)
+        prices_48 = self.Price_Agent.return_day_ahead_prices(tomorrow)
         prices_from_start_time = pd.DataFrame()
         for i in range(24):
             prices_from_start_time["Price_at_H+" + str(i)] = prices_48.shift(-i)
@@ -1540,6 +1570,7 @@ class Recommendation_Agent:
         # multiply both tables and aggregate costs for each starting hour
         costs = np.array(prices) * np.array(device_load)
         costs = np.sum(costs, axis=0)
+        costs = costs/1000000
         # return an array of size 24 containing the total cost at each staring hour.
         return costs
 
@@ -1600,8 +1631,11 @@ class Recommendation_Agent:
         if usage_prob < usage_prob_threshold:
             no_recommend_flag_usage = 1
 
+        tomorrow = (pd.to_datetime(date) + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+
         return {
-            "recommendation_date": [date],
+            "recommendation_calculation_date": [date],
+            "recommendation_date": [tomorrow],
             "device": [device],
             "best_launch_hour": [best_hour],
             "no_recommend_flag_activity": [no_recommend_flag_activity],
@@ -1612,8 +1646,45 @@ class Recommendation_Agent:
                 else np.nan
             ],
         }
+    
+    # vizualizing the recommendations
+    # -------------------------------------------------------------------------------------------
+    def recommendations_on_date_range(
+        self, date_range, activity_prob_threshold=0.6, usage_prob_threshold=0.5
+    ):
+        import pandas as pd
 
+        recommendations = []
+        for date in date_range:
+            recommendations.append(self.pipeline(date, activity_prob_threshold, usage_prob_threshold))
+            output = pd.concat(recommendations)
+        return output
 
+    def visualize_recommendations_on_date_range(self, recs):
+        import plotly.express as px
+        import plotly.graph_objects as go
+
+        fig = go.Figure()
+
+        for device in recs["device"].unique():
+            plot_device = recs[recs["device"] == device]
+            fig.add_trace(
+                go.Scatter(
+                    x=plot_device["recommendation_date"],
+                    y=plot_device["recommendation"],
+                    mode="lines",
+                    name=device,
+                )
+            )
+        fig.show()
+
+    def histogram_recommendation_hour(self, recs):
+        import seaborn as sns
+
+        ax = sns.displot(recs, x="recommendation", binwidth=1)
+        ax.set(xlabel="Hour of Recommendation", ylabel="counts")
+
+    # visualize recommendation_by device
     def visualize_recommendation_by_device(self, dict):
         import datetime
         recommendation_date = str(dict['recommendation_date'][0])
@@ -1660,6 +1731,8 @@ class Recommendation_Agent:
             recommendations_table = recommendations_table.append(
                 pd.DataFrame.from_dict(recommendations_by_device)
             )
+            recommendations_table["index"] = recommendations_table.apply(lambda row: row.recommendation_date + "_" + row.device, axis=1)
+            recommendations_table.set_index("index", inplace = True)
         return recommendations_table
 
     def visualize_recommendation(self, recommendations_table, price):
@@ -1677,3 +1750,603 @@ class Recommendation_Agent:
                 return output
             else:
                 return
+
+# X_Recommendation Agent
+# ===============================================================================================
+class X_Recommendation_Agent:
+    def __init__(
+        self, activity_input, usage_input, load_input, price_input, shiftable_devices, best_hour = None, model_type = 'random forest'):
+        self.activity_input = activity_input
+        self.usage_input = usage_input
+        self.load_input = load_input
+        self.price_input = price_input
+        self.shiftable_devices = shiftable_devices
+        self.model_type = model_type
+        self.Activity_Agent = Activity_Agent(activity_input)
+        # create dicionnary with Usage_Agent for each device
+        self.Usage_Agent = {
+            name: Usage_Agent(usage_input, name) for name in shiftable_devices
+        }
+        self.Load_Agent = Load_Agent(load_input)
+        self.Price_Agent = Price_Agent()
+        self.best_hour = best_hour
+
+    # calculating costs
+    # -------------------------------------------------------------------------------------------
+    def electricity_prices_from_start_time(self, date):
+        import pandas as pd
+        tomorrow = (pd.to_datetime(date) + pd.Timedelta(days=1)).strftime("%Y-%m-%d") 
+
+        prices_48 = self.Price_Agent.return_day_ahead_prices(tomorrow)
+        prices_from_start_time = pd.DataFrame()
+        for i in range(24):
+            prices_from_start_time["Price_at_H+" + str(i)] = prices_48.shift(-i)
+        # delete last 24 hours
+        prices_from_start_time = prices_from_start_time[:-24]
+        return prices_from_start_time
+
+    def cost_by_starting_time(self, date, device, evaluation=False):
+        import numpy as np
+        import pandas as pd
+
+        # get electriciy prices following every device starting hour with previously defined function
+        prices = self.electricity_prices_from_start_time(date)
+        # build up table with typical load profile repeated for every hour (see Load_Agent)
+        if not evaluation:
+            device_load = self.Load_Agent.pipeline(
+                self.load_input, date, self.shiftable_devices
+            ).loc[device]
+        else:
+            # get device load for one date
+            device_load = evaluation["load"][date].loc[device]
+        device_load = pd.concat([device_load] * 24, axis=1)
+        # multiply both tables and aggregate costs for each starting hour
+        costs = np.array(prices) * np.array(device_load)
+        costs = np.sum(costs, axis=0)
+        costs = costs/1000000
+        # return an array of size 24 containing the total cost at each staring hour.
+        return costs
+
+    # creating recommendations
+    # -------------------------------------------------------------------------------------------
+    def recommend_by_device(
+        self,
+        date,
+        device,
+        activity_prob_threshold,
+        usage_prob_threshold,
+        evaluation=False,
+        weather_sel=False
+    ):
+        import numpy as np
+
+        # add split params as input
+        # IN PARTICULAR --> Specify date to start training
+        split_params = {
+            "train_start": "",
+            "test_delta": {"days": 1, "seconds": -1},
+            "target": "activity",
+        }
+        # compute costs by launching time:
+        costs = self.cost_by_starting_time(date, device, evaluation=evaluation)
+
+        X_train_activity = None
+        X_test_activity = None
+        model_activity = None
+        model_usage = None
+
+        # compute activity probabilities
+        if not evaluation:
+            if weather_sel:
+                activity_probs, X_train_activity, X_test_activity, model_activity = self.Activity_Agent.pipeline_xai(
+                    self.activity_input, date, self.model_type, split_params, weather_sel=True)
+            else:
+                activity_probs, X_train_activity, X_test_activity, model_activity = self.Activity_Agent.pipeline_xai(
+                    self.activity_input, date, self.model_type, split_params, weather_sel=False)
+        else:
+            # get activity probs for date
+            activity_probs = evaluation["activity"][date]
+
+        # set values above threshold to 1. Values below to Inf
+        # (vector will be multiplied by costs, so that hours of little activity likelihood get cost = Inf)
+        activity_probs = np.where(activity_probs >= activity_prob_threshold, 1, float("Inf"))
+
+        # add a flag in case all hours have likelihood smaller than threshold
+        no_recommend_flag_activity = 0
+        if np.min(activity_probs) == float("Inf"):
+            no_recommend_flag_activity = 1
+
+        # compute cheapest hour from likely ones
+        self.best_hour = np.argmin(np.array(costs) * np.array(activity_probs))
+
+        # compute likelihood of usage:
+        if not evaluation:
+            if weather_sel:
+                usage_prob, X_train_usage, X_test_usage, model_usage = self.Usage_Agent[device].pipeline_xai(
+                    self.usage_input, date,self.model_type, split_params["train_start"], weather_sel=True)
+            else:
+                usage_prob, X_train_usage, X_test_usage, model_usage = self.Usage_Agent[device].pipeline_xai(
+                self.usage_input, date,self.model_type, split_params["train_start"], weather_sel=False)
+        else:
+            # get usage probs
+            name = ("usage_" + device.replace(" ", "_").replace("(", "").replace(")", "").lower())
+            usage_prob = evaluation[name][date]
+
+
+        no_recommend_flag_usage = 0
+        if usage_prob < usage_prob_threshold:
+            no_recommend_flag_usage = 1
+
+        self.Explainability_Agent = Explainability_Agent(model_activity, X_train_activity, X_test_activity, self.best_hour, model_usage,
+        X_train_usage, X_test_usage, model_type=self.model_type)
+
+        explain = Explainability_Agent(model_activity, X_train_activity, X_test_activity,
+                                       self.best_hour,model_usage,X_train_usage, X_test_usage,
+                                       model_type= self.model_type)
+        feature_importance_activity, feature_importance_usage, explainer_activity, explainer_usage, shap_values, shap_values_usage, X_test_activity, X_test_usage = explain.feature_importance()
+
+        tomorrow = (pd.to_datetime(date) + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+
+        return {
+            "recommendation_calculation_date": [date],
+            "recommendation_date": [tomorrow],
+            "device": [device],
+            "best_launch_hour": [self.best_hour],
+            "no_recommend_flag_activity": [no_recommend_flag_activity],
+            "no_recommend_flag_usage": [no_recommend_flag_usage],
+            "recommendation": [
+                self.best_hour
+                if (no_recommend_flag_activity == 0 and no_recommend_flag_usage == 0)
+                else np.nan
+            ],
+            "feature_importance_activity": [feature_importance_activity],
+            "feature_importance_usage": [feature_importance_usage],
+            "explainer_activity": [explainer_activity],
+            "explainer_usage": [explainer_usage],
+            "shap_values": [shap_values],
+            "shap_values_usage": [shap_values_usage],
+            "X_test_activity": [X_test_activity],
+            "X_test_usage": [X_test_usage],
+        }
+
+    # visualize recommendation_by device
+    def visualize_recommendation_by_device(self, dict):
+        import datetime
+        recommendation_date = str(dict['recommendation_date'][0])
+        recommendation_date = datetime.datetime.strptime(recommendation_date, '%Y-%m-%d')
+        best_launch_hour = dict['best_launch_hour'][0]
+        recommendation_date = recommendation_date.replace(hour=best_launch_hour)
+        recommendation_date = recommendation_date.strftime(format = "%d.%m.%Y %H:%M")
+        device = dict['device'][0]
+        if (dict['no_recommend_flag_activity'][0]== 0 and dict['no_recommend_flag_usage'][0]==0) == True:
+            return print('You have one recommendation for the following device: ' + str(device) + '\nPlease use it on ' + recommendation_date[0:10] + ' at '+ recommendation_date[11:]+'.')
+
+
+    # vizualizing the recommendations
+    # -------------------------------------------------------------------------------------------
+    def recommendations_on_date_range(
+        self, date_range, activity_prob_threshold=0.6, usage_prob_threshold=0.5
+    ):
+        import pandas as pd
+
+        recommendations = []
+        for date in date_range:
+            recommendations.append(self.pipeline(date, activity_prob_threshold, usage_prob_threshold))
+            output = pd.concat(recommendations)
+        return output
+
+    def visualize_recommendations_on_date_range(self, recs):
+        import plotly.express as px
+        import plotly.graph_objects as go
+
+        fig = go.Figure()
+
+        for device in recs["device"].unique():
+            plot_device = recs[recs["device"] == device]
+            fig.add_trace(
+                go.Scatter(
+                    x=plot_device["recommendation_date"],
+                    y=plot_device["recommendation"],
+                    mode="lines",
+                    name=device,
+                )
+            )
+        fig.show()
+
+    def histogram_recommendation_hour(self, recs):
+        import seaborn as sns
+
+        ax = sns.displot(recs, x="recommendation", binwidth=1)
+        ax.set(xlabel="Hour of Recommendation", ylabel="counts")
+
+    # pipeline function: create recommendations
+    # -------------------------------------------------------------------------------------------
+    def pipeline(self, date, activity_prob_threshold, usage_prob_threshold, evaluation=False, weather_sel=False):
+        import pandas as pd
+
+        recommendations_by_device = self.recommend_by_device(
+            date,
+            self.shiftable_devices[0],
+            activity_prob_threshold,
+            usage_prob_threshold,
+            evaluation=evaluation,
+        )
+        recommendations_table = pd.DataFrame.from_dict(recommendations_by_device)
+
+        for device in self.shiftable_devices[1:]:
+            if weather_sel:
+                recommendations_by_device = self.recommend_by_device(
+                    date,
+                    device,
+                    activity_prob_threshold,
+                    usage_prob_threshold,
+                    evaluation=evaluation,
+                    weather_sel=True
+                )
+            else:
+                recommendations_by_device = self.recommend_by_device(
+                    date,
+                    device,
+                    activity_prob_threshold,
+                    usage_prob_threshold,
+                    evaluation=evaluation,
+                )
+            recommendations_table = recommendations_table.append(
+                pd.DataFrame.from_dict(recommendations_by_device)
+            )
+            recommendations_table["index"] = recommendations_table.apply(lambda row: row.recommendation_date + "_" + row.device, axis=1)
+            recommendations_table.set_index("index", inplace = True)
+        return recommendations_table
+
+    def visualize_recommendation(self, recommendations_table, price, diagnostics=False):
+        self.diagnostics = diagnostics
+        from datetime import datetime
+        import shap
+
+        for r in range(len(recommendations_table)):
+            if (recommendations_table.no_recommend_flag_activity.iloc[r] == 0 and
+                recommendations_table.no_recommend_flag_usage.iloc[r] == 0) == True:
+
+                recommendations = True
+            else:
+                recommendations = False
+
+        if recommendations == True:
+
+            feature_importance_activity = recommendations_table['feature_importance_activity'].iloc[0]
+            date = recommendations_table.recommendation_date.iloc[0]
+            best_hour = recommendations_table.best_launch_hour.iloc[0]
+            explaination_activity = Explainability_Agent_i.explanation_from_feature_importance_activity(feature_importance_activity, date=date , best_hour=best_hour, diagnostics=self.diagnostics)
+
+            output = []
+            explaination_usage = []
+            for i in range(len(recommendations_table)):
+
+                if (recommendations_table.no_recommend_flag_activity.iloc[i] == 0 and
+                recommendations_table.no_recommend_flag_usage.iloc[i] == 0) == True:
+
+                    date_and_time = recommendations_table.recommendation_date.iloc[i] + ':' + str(recommendations_table.best_launch_hour.iloc[i])
+
+                    date_and_time =  datetime.strptime(date_and_time, '%Y-%m-%d:%H')
+
+                    date_and_time_show = date_and_time.strftime(format = "%d.%m.%Y %H:%M")
+                    date_and_time_price = date_and_time.strftime(format = "%Y-%m-%d %H:%M:%S")
+
+                    price_rec = price.filter(like=date_and_time_price, axis=0)['Price_at_H+0'].iloc[0]
+                    price_mean = price['Price_at_H+0'].sum() / 24
+                    price_dif = price_rec / price_mean
+                    price_savings_percentage = round((1 - price_dif) * 100, 2)
+
+                    output = print('You have a recommendation for the following device: ' + recommendations_table.device.iloc[i] + '\n\nPlease use the device on the ' + date_and_time_show[0:10] + ' at ' + date_and_time_show[11:] + " o'clock because it saves you " + str(price_savings_percentage) + ' % of costs compared to the mean of the day.\n')
+                    feature_importance_usage_device = recommendations_table['feature_importance_usage'].iloc[i]
+                    explaination_usage = Explainability_Agent_i.explanation_from_feature_importance_usage(feature_importance_usage_device, date=date, diagnostics=self.diagnostics)
+                    print(explaination_usage)
+
+
+                    if self.diagnostics == True:
+                        print('Vizualizations for further insights into our predictions: ')
+                        explainer_usage = recommendations_table['explainer_usage'].iloc[i]
+                        shap_values_usage = recommendations_table['shap_values_usage'].iloc[i]
+                        X_test_usage = recommendations_table['X_test_usage'].iloc[i]
+                        shap_plot_usage = shap.force_plot(explainer_usage.expected_value[1], shap_values_usage[1], X_test_usage)
+                        display(shap_plot_usage)
+
+                else:
+                    print('There is no recommendation for the device ' + recommendations_table.device.iloc[i] + ' .')
+
+            print(explaination_activity)
+
+            if self.diagnostics == False:
+                print('For detailed information switch on the diagnostics parameter.')
+            return
+
+        else:
+            print('There are no recommendations for today.')
+            return None            
+            
+            
+            
+###################################################################################################
+# Explainability agent ############################################################################
+###################################################################################################    
+class Explainability_Agent:
+    def __init__(self, model_activity, X_train_activity, X_test_activity, best_hour, model_usage,
+               X_train_usage, X_test_usage, model_type):
+        self.model_activity = model_activity
+        self.model_type = model_type
+        self.X_train_activity = X_train_activity
+        self.X_test_activity = X_test_activity
+        self.best_hour = best_hour
+        self.model_usage = model_usage
+        self.X_train_usage = X_train_usage
+        self.X_test_usage = X_test_usage
+
+    def feature_importance(self):
+        if self.model_type == "logit":
+            X_train_summary = shap.sample(self.X_train_activity, 100)
+            self.explainer_activity = shap.KernelExplainer(self.model_activity.predict_proba, X_train_summary)
+
+        elif self.model_type == "ada":
+            X_train_summary = shap.sample(self.X_train_activity, 100)
+            self.explainer_activity = shap.KernelExplainer(self.model_activity.predict_proba, X_train_summary)
+
+        elif self.model_type == "knn":
+            X_train_summary = shap.sample(self.X_train_activity, 100)
+            self.explainer_activity = shap.KernelExplainer(self.model_activity.predict_proba, X_train_summary)
+
+        elif self.model_type == "random forest":
+
+            self.explainer_activity = shap.TreeExplainer(self.model_activity, self.X_train_activity)
+
+        elif self.model_type == "xgboost":
+            self.explainer_activity = shap.TreeExplainer(self.model_activity, self.X_train_activity, model_output='predict_proba')
+        else:
+            raise InputError("Unknown model type.")
+
+
+        self.shap_values = self.explainer_activity.shap_values(
+            self.X_test_activity.iloc[self.best_hour, :])
+
+        feature_names_activity = list(self.X_train_activity.columns.values)
+
+        vals_activity = self.shap_values[1]
+
+        feature_importance_activity = pd.DataFrame(list(zip(feature_names_activity, vals_activity)),
+                                                   columns=['col_name', 'feature_importance_vals'])
+        feature_importance_activity.sort_values(by=['feature_importance_vals'], ascending=False, inplace=True)
+
+        # usage
+        if self.model_type == "logit":
+            X_train_summary = shap.sample(self.X_train_usage, 100)
+            self.explainer_usage = shap.KernelExplainer(self.model_usage.predict_proba, X_train_summary)
+
+
+        elif self.model_type == "ada":
+            X_train_summary = shap.sample(self.X_train_usage, 100)
+            self.explainer_usage = shap.KernelExplainer(self.model_usage.predict_proba, X_train_summary)
+
+        elif self.model_type == "knn":
+            X_train_summary = shap.sample(self.X_train_usage, 100)
+            self.explainer_usage = shap.KernelExplainer(self.model_usage.predict_proba, X_train_summary)
+
+        elif self.model_type == "random forest":
+
+            self.explainer_usage = shap.TreeExplainer(self.model_usage, self.X_train_usage)
+
+        elif self.model_type == "xgboost":
+            self.explainer_usage = shap.TreeExplainer(self.model_usage, self.X_train_usage, model_output='predict_proba')
+        else:
+            raise InputError("Unknown model type.")
+
+
+        self.shap_values_usage = self.explainer_usage.shap_values(
+            self.X_test_usage)
+
+        feature_names_usage = list(self.X_train_usage.columns.values)
+
+        vals = self.shap_values_usage[1]
+
+        feature_importance_usage = pd.DataFrame(list(zip(feature_names_usage, vals)),
+                                                columns=['col_name', 'feature_importance_vals'])
+        feature_importance_usage.sort_values(by=['feature_importance_vals'], ascending=False, inplace=True)
+
+        return feature_importance_activity, feature_importance_usage, self.explainer_activity, self.explainer_usage, self.shap_values, self.shap_values_usage, self.X_test_activity, self.X_test_usage
+
+    def explanation_from_feature_importance_activity(self, feature_importance_activity, date, best_hour, diagnostics=False, weather_sel = False):
+        self.feature_importance_activity = feature_importance_activity
+        self.diagnostics = diagnostics
+
+        sentence = 'We based the recommendation on your past activity and usage of the device. '
+
+        #activity_lags:
+
+        if self.X_test_activity['activity_lag_24'].iloc[self.best_hour] and self.X_test_activity['activity_lag_48'].iloc[self.best_hour] and self.X_test_activity['activity_lag_72'].iloc[self.best_hour] ==0:
+            active_past = 'not '
+        else:
+            active_past = ''
+
+        # input the activity lag with the strongest feature importance
+        if feature_importance_activity.loc[feature_importance_activity['col_name']=='activity_lag_24','feature_importance_vals'].to_numpy()[0] >= 0 or \
+                feature_importance_activity.loc[feature_importance_activity['col_name']=='activity_lag_48','feature_importance_vals'].to_numpy()[0] >= 0 or \
+                feature_importance_activity.loc[feature_importance_activity['col_name']=='activity_lag_72','feature_importance_vals'].to_numpy()[0] >= 0:
+
+                FI_lag = np.argmax([feature_importance_activity.loc[feature_importance_activity['col_name']=='activity_lag_24','feature_importance_vals'],
+                                   feature_importance_activity.loc[feature_importance_activity['col_name']=='activity_lag_48','feature_importance_vals'],
+                                   feature_importance_activity.loc[feature_importance_activity['col_name']=='activity_lag_72','feature_importance_vals']])
+
+                if FI_lag == 0:
+                    activity_lag = 'day'
+                elif FI_lag == 1:
+                    activity_lag = 'two days'
+                elif FI_lag == 2:
+                    activity_lag = 'three days'
+                else:
+                    activity_lag = 'three days'
+
+                part1 = f"We believe you are active today since you were {active_past}active during the last {activity_lag}."
+        else:
+            part1 = ""
+
+        if weather_sel:
+            # weather:
+            # need to rewrite that part afterwards, we need different weather data!
+
+            # weather_hourly = pd.read_pickle('../export/weather_unscaled_hourly.pkl')
+
+
+            d = {'features': ['dwpt', 'rhum', 'temp', 'wdir', 'wspd'],
+                 'labels': ['dewing point', 'relative humidity','temperature', 'wind direction', 'windspeed'],
+                 'feature_importances' : [feature_importance_activity.loc[feature_importance_activity[
+                                                                    'col_name'] == 'dwpt', 'feature_importance_vals'].to_numpy()[0],
+                                      feature_importance_activity.loc[feature_importance_activity[
+                                                                    'col_name'] == 'rhum', 'feature_importance_vals'].to_numpy()[0],
+                                      feature_importance_activity.loc[feature_importance_activity[
+                                                                    'col_name'] == 'temp', 'feature_importance_vals'].to_numpy()[0],
+                                      feature_importance_activity.loc[feature_importance_activity[
+                                                                          'col_name'] == 'wdir', 'feature_importance_vals'].to_numpy()[0],
+                                      feature_importance_activity.loc[feature_importance_activity[
+                                                                          'col_name'] == 'wspd', 'feature_importance_vals'].to_numpy()[0]],
+                 'feature_values' : [weather_hourly[date].iloc[best_hour, -5:].loc['dwpt'],
+                                     weather_hourly[date].iloc[best_hour, -5:].loc['rhum'],
+                                     weather_hourly[date].iloc[best_hour, -5:].loc['temp'],
+                                     weather_hourly[date].iloc[best_hour, -5:].loc['wdir'],
+                                     weather_hourly[date].iloc[best_hour, -5:].loc['wspd']
+                                     ]
+
+                 }
+            df = pd.DataFrame(data=d)
+
+            sorted_df = df['feature_importances'].sort_values(ascending=False)
+            if sorted_df.iloc[0] >= 0:
+                weather1_ind = sorted_df.index[0]
+                weather1 = df['labels'][weather1_ind]
+
+                value1 = round(df['feature_values'][weather1_ind], 2)
+
+                part2= f"The weather condition ({weather1}:{value1}) support that recommendation."
+
+                if sorted_df.iloc[1] >= 0:
+
+                    weather2_ind = sorted_df.index[1]
+                    weather2 = df['labels'][weather2_ind]
+
+                    value2 = round(df['feature_values'][weather2_ind], 2)
+                    part2 = f"The weather conditions ({weather1}:{value1}, {weather2}:{value2}) support that recommendation."
+
+            else:
+                part2= ""
+        else:
+            part2 = ""
+
+        # Time features
+        # DAY
+        day_names = ['day_name_Monday','day_name_Tuesday','day_name_Wednesday','day_name_Thursday','day_name_Saturday','day_name_Sunday']
+        for day in day_names:
+            if feature_importance_activity.loc[feature_importance_activity['col_name'] == day, 'feature_importance_vals'].to_numpy()[0] >= 0:
+                part3 = "The weekday strenghtens that prediction."
+
+                if feature_importance_activity.loc[
+                    feature_importance_activity['col_name'] == 'hour', 'feature_importance_vals'].to_numpy()[0] >= 0:
+                    part3 = "The weekday and hour strenghtens that prediction."
+
+            else:
+                part3 = ""
+                if feature_importance_activity.loc[
+                    feature_importance_activity['col_name'] == 'hour', 'feature_importance_vals'].to_numpy()[0] >= 0:
+                    part3 = "The hour strenghtens that prediction."
+
+
+        # final activity sentence
+        sentence_activity = (str(part1) + str(part2)+ str(part3))
+
+        explanation_sentence = sentence + sentence_activity
+
+        return explanation_sentence
+
+    def explanation_from_feature_importance_usage(self, feature_importance_usage, date, diagnostics=False, weather_sel = False):
+
+        self.feature_importance_usage= feature_importance_usage
+        self.diagnostics = diagnostics
+
+        if self.X_test_usage['active_last_2_days'] == 0:
+            active_past = 'not'
+        else:
+            active_past = ''
+
+        if feature_importance_usage.loc[0, 'feature_importance_vals'] >= 0 or feature_importance_usage.loc[1, 'feature_importance_vals'] >= 0:
+
+            FI_lag = np.argmax([feature_importance_usage.loc[0, 'feature_importance_vals'],
+                                feature_importance_usage.loc[1, 'feature_importance_vals']])
+
+            if FI_lag == 0:
+                device_usage = ""
+                number_days = 'day'
+            elif FI_lag == 1:
+                device_usage = ""
+                number_days = 'two days'
+            else:
+                device_usage = " not"
+                number_days = 'two days'
+
+            part1 = f" and have{device_usage} used the device in the last {number_days}"
+
+        else:
+            part1= ""
+
+        if weather_sel:
+            # weather:
+            # need to rewrite that part afterwards, we need different weather data!
+            weather_daily = pd.read_pickle('../export/weather_unscaled_daily.pkl')
+
+            d = {'features': ['dwpt', 'rhum', 'temp', 'wdir', 'wspd'],
+                 'labels': ['dewing point', 'relative humidity','temperature', 'wind direction', 'windspeed'],
+                 'feature_importances' : [feature_importance_usage.loc[feature_importance_usage[
+                                                                    'col_name'] == 'dwpt', 'feature_importance_vals'].to_numpy()[0],
+                                      feature_importance_usage.loc[feature_importance_usage[
+                                                                    'col_name'] == 'rhum', 'feature_importance_vals'].to_numpy()[0],
+                                      feature_importance_usage.loc[feature_importance_usage[
+                                                                    'col_name'] == 'temp', 'feature_importance_vals'].to_numpy()[0],
+                                      feature_importance_usage.loc[feature_importance_usage[
+                                                                          'col_name'] == 'wdir', 'feature_importance_vals'].to_numpy()[0],
+                                      feature_importance_usage.loc[feature_importance_usage[
+                                                                          'col_name'] == 'wspd', 'feature_importance_vals'].to_numpy()[0]],
+                 'feature_values': [weather_daily.loc[date].loc['dwpt'],
+                                    weather_daily.loc[date].loc['rhum'],
+                                    weather_daily.loc[date].loc['temp'],
+                                    weather_daily.loc[date].loc['wdir'],
+                                    weather_daily.loc[date].loc['wspd']
+                 ]
+
+
+                 }
+            df = pd.DataFrame(data=d)
+
+            sorted_df = df['feature_importances'].sort_values(ascending=False)
+
+
+            if sorted_df.iloc[0] >= 0:
+                weather1_ind = sorted_df.index[0]
+                weather1 = df['labels'][weather1_ind]
+
+                value1 = round(df['feature_values'][weather1_ind], 2)
+
+                part2= f"The weather condition ({weather1}:{value1}) support that recommendation."
+
+                if sorted_df.iloc[1] >= 0:
+
+                    weather2_ind = sorted_df.index[1]
+                    weather2 = df['labels'][weather2_ind]
+
+                    value2 = round(df['feature_values'][weather2_ind], 2)
+                    part2 = f"The weather conditions ({weather1}:{value1}, {weather2}:{value2}) support that recommendation."
+
+        else:
+            part2 = ""
+
+        sentence_usage = f"We believe you are likely to use the device in the near future since you " \
+                         f"were {active_past}active during the last 2 days" + str(part1) + "." + str(part2)
+        explanation_sentence = sentence_usage
+
+        return explanation_sentence
+
+
