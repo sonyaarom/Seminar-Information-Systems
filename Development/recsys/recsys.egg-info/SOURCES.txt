@@ -1,6 +1,0 @@
-setup.py
-recsys.egg-info/PKG-INFO
-recsys.egg-info/SOURCES.txt
-recsys.egg-info/dependency_links.txt
-recsys.egg-info/requires.txt
-recsys.egg-info/top_level.txt
