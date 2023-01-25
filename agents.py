@@ -126,19 +126,26 @@ class Preparation_Agent:
     def last_reported(self, df):
         return str(df.index.max())[:10]
     
-    def add_dummy_data_tomorrow(self, df):
-        date = self.last_reported(df)
-        tomorrow = (pd.to_datetime(date) + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+    def days_between(self, d1, d2):
+        d1 = datetime.strptime(d1, "%Y-%m-%d")
+        d2 = datetime.strptime(d2, "%Y-%m-%d")
+        return abs((d2 - d1).days)
 
+    
+    def add_dummy_data_tomorrow(self, df):
+
+        today = str(datetime.now())[:10]
+        last_updated = self.last_reported(df)
+        tomorrow = (pd.to_datetime(today) + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+        diff_days = self.days_between(last_updated, today)
         # determine how many hours we need to fill up (missing hours till new day + 23 for tomorrow, day of prediction)
-        hours_to_fill = 24 - int(str(df.index.max())[11:13]) + 23
+        hours_to_fill = 24 - int(str(df.index.max())[11:13]) + 23 + (24 * diff_days)
 
         # add rows and fill up with dummy 0
         for i in range(0,hours_to_fill):
             idx = df.tail(1).index[0] + pd.Timedelta(hours=1)
             df.loc[idx] = 0
         return df
-
     
     def plot_consumption(self, df, features='all', figsize='default', threshold=None, title='Consumption'):
         df = df.copy()
@@ -392,6 +399,10 @@ class Preparation_Agent:
 
         return output
 
+
+###################################################################################################
+# usage agent       ###############################################################################
+###################################################################################################
 class Usage_Agent:
     import pandas as pd
 

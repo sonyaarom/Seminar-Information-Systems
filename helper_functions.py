@@ -152,7 +152,7 @@ class Helper:
 
         with sqlite3.connect(file) as con:
             cur = con.cursor()
-            cur.execute("SELECT * FROM state_attributes WHERE last_updated > DATETIME('now', '-30 day')")
+            cur.execute("SELECT * FROM state_attributes")
             state_attributes = cur.fetchall()
         from_state_attributes_db = []
         for result in state_attributes:
