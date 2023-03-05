@@ -1555,7 +1555,7 @@ class Recommendation_Agent:
         import pandas as pd
         tomorrow = (pd.to_datetime(date) + pd.Timedelta(days=1)).strftime("%Y-%m-%d") 
 
-        prices_48 = self.Price_Agent.return_day_ahead_prices(tomorrow)
+        prices_48 = self.Price_Agent.return_day_ahead_prices(date)
         prices_from_start_time = pd.DataFrame()
         for i in range(24):
             prices_from_start_time["Price_at_H+" + str(i)] = prices_48.shift(-i)
@@ -1788,7 +1788,7 @@ class X_Recommendation_Agent:
         import pandas as pd
         tomorrow = (pd.to_datetime(date) + pd.Timedelta(days=1)).strftime("%Y-%m-%d") 
 
-        prices_48 = self.Price_Agent.return_day_ahead_prices(tomorrow)
+        prices_48 = self.Price_Agent.return_day_ahead_prices(date)
         prices_from_start_time = pd.DataFrame()
         for i in range(24):
             prices_from_start_time["Price_at_H+" + str(i)] = prices_48.shift(-i)
