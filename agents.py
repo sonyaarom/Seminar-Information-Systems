@@ -2013,21 +2013,20 @@ class X_Recommendation_Agent:
         self.diagnostics = diagnostics
         from datetime import datetime
         import shap
+        recommendations = False
 
         for r in range(len(recommendations_table)):
             if (recommendations_table.no_recommend_flag_activity.iloc[r] == 0 and
                 recommendations_table.no_recommend_flag_usage.iloc[r] == 0) == True:
 
                 recommendations = True
-            else:
-                recommendations = False
 
         if recommendations == True:
 
             feature_importance_activity = recommendations_table['feature_importance_activity'].iloc[0]
             date = recommendations_table.recommendation_date.iloc[0]
             best_hour = recommendations_table.best_launch_hour.iloc[0]
-            explaination_activity = Explainability_Agent_i.explanation_from_feature_importance_activity(feature_importance_activity, date=date , best_hour=best_hour, diagnostics=self.diagnostics)
+            explaination_activity = self.Explainability_Agent.explanation_from_feature_importance_activity(feature_importance_activity, date=date , best_hour=best_hour, diagnostics=self.diagnostics)
 
             output = []
             explaination_usage = []
@@ -2050,7 +2049,7 @@ class X_Recommendation_Agent:
 
                     output = print('You have a recommendation for the following device: ' + recommendations_table.device.iloc[i] + '\n\nPlease use the device on the ' + date_and_time_show[0:10] + ' at ' + date_and_time_show[11:] + " o'clock because it saves you " + str(price_savings_percentage) + ' % of costs compared to the mean of the day.\n')
                     feature_importance_usage_device = recommendations_table['feature_importance_usage'].iloc[i]
-                    explaination_usage = Explainability_Agent_i.explanation_from_feature_importance_usage(feature_importance_usage_device, date=date, diagnostics=self.diagnostics)
+                    explaination_usage = self.Explainability_Agent.explanation_from_feature_importance_usage(feature_importance_usage_device, date=date, diagnostics=self.diagnostics)
                     print(explaination_usage)
 
 
@@ -2073,8 +2072,7 @@ class X_Recommendation_Agent:
 
         else:
             print('There are no recommendations for today.')
-            return None            
-            
+            return None
             
             
 ###################################################################################################
