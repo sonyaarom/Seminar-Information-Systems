@@ -1518,14 +1518,18 @@ class Price_Agent():
         date = date + timedelta(days = 1)
         current_timezone = pytz.timezone(timezone)
         date = current_timezone.localize(date)
-        start = (date - timedelta(days= 3)).normalize()
-        end = (date + timedelta(days = 3)).normalize()
+        start = (date - timedelta(days= 20)).normalize()
+        end = (date + timedelta(days = 20)).normalize()
         country_code = 'DE_LU'
         client = EntsoePandasClient(api_key='6f67ccf4-edb3-4100-a850-969c73688627')
         df = client.query_day_ahead_prices(country_code = country_code, start = start, end = end)
         
         # handling problem with missing price data for more than 24 hours ahead
-        if(date.strftime('%Y-%m-%d') == max(df.index).strftime('%Y-%m-%d')):
+        indicator = date.replace(hour=0, minute=0, second=0, microsecond=0)
+        if(indicator < max(df.index).replace(hour=0, minute=0, second=0, microsecond=0)):
+            range_hours = pd.date_range(start=date, freq="H", periods=48)
+            df = df.loc[range_hours]
+        if(indicator.strftime('%Y-%m-%d') == max(df.index).strftime('%Y-%m-%d')):
             date_48 = date + timedelta(days=1)
             for hour in range(24):
                 dt = date_48.replace(hour=hour, minute=0, second=0, microsecond=0)
@@ -1534,26 +1538,35 @@ class Price_Agent():
                 value = df.loc[day_before]
                 # Append the new row to the series
                 df.loc[dt] = value
-        if(date > max(df.index)):
-            date_48 = date + timedelta(days=1)
+            range_hours = pd.date_range(start=date, freq="H", periods=48)
+            df = df.loc[range_hours]
+        if(indicator > max(df.index).replace(hour=0, minute=0, second=0, microsecond=0)):
+            date_now = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+            date_48 = date_now + timedelta(days=1)
             for hour in range(24):
                 dt = date_48.replace(hour=hour, minute=0, second=0, microsecond=0)
+                dt = current_timezone.localize(dt)
                 # Get the price from the day before at this hour
-                day_before = dt - timedelta(days=1)
+                day_before = date_now.replace(hour=hour, minute=0, second=0, microsecond=0)
+                day_before = current_timezone.localize(day_before)
                 value = df.loc[day_before]
                 # Append the new row to the series
                 df.loc[dt] = value
-            date_48 = date + timedelta(days=2)
+            date_now = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+            date_48 = date_now + timedelta(days=2)
             for hour in range(24):
                 dt = date_48.replace(hour=hour, minute=0, second=0, microsecond=0)
+                dt = current_timezone.localize(dt)
                 # Get the price from the day before at this hour
-                day_before = dt - timedelta(days=1)
+                day_before = date_now.replace(hour=hour, minute=0, second=0, microsecond=0)
+                day_before = current_timezone.localize(day_before)
                 value = df.loc[day_before]
                 # Append the new row to the series
                 df.loc[dt] = value
-                
-        range_hours = pd.date_range(start=date, freq="H", periods=48)
-        df = df.loc[range_hours]
+            date_tomorrow = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+            date_tomorrow = current_timezone.localize(date_tomorrow)
+            range_hours = pd.date_range(start=date_tomorrow, freq="H", periods=48)
+            df = df.loc[range_hours]
         return df
     
 ###################################################################################################
