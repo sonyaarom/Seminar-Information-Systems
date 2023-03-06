@@ -1510,25 +1510,54 @@ class Price_Agent():
 
     def return_day_ahead_prices(self, date, timezone = 'Europe/Brussels'):
         import pandas as pd
-        import datetime
+        from datetime import datetime, timedelta
         from entsoe import EntsoePandasClient
         import pytz
         date = pd.to_datetime(date,format= '%Y-%m-%d')
+        # looking for tommorow prices
+        date = date + timedelta(days = 1)
         current_timezone = pytz.timezone(timezone)
         date = current_timezone.localize(date)
-        start = (date - datetime.timedelta(days= 3)).normalize()
-        end = (date + datetime.timedelta(days = 3)).normalize()
+        start = (date - timedelta(days= 3)).normalize()
+        end = (date + timedelta(days = 3)).normalize()
         country_code = 'DE_LU'
         client = EntsoePandasClient(api_key='6f67ccf4-edb3-4100-a850-969c73688627')
         df = client.query_day_ahead_prices(country_code = country_code, start = start, end = end)
-        range = pd.date_range(start=date, freq="H", periods=48)
-        df = df.loc[range]
+        
+        # handling problem with missing price data for more than 24 hours ahead
+        if(date.strftime('%Y-%m-%d') == max(df.index).strftime('%Y-%m-%d')):
+            date_48 = date + timedelta(days=1)
+            for hour in range(24):
+                dt = date_48.replace(hour=hour, minute=0, second=0, microsecond=0)
+                # Get the price from the day before at this hour
+                day_before = dt - timedelta(days=1)
+                value = df.loc[day_before]
+                # Append the new row to the series
+                df.loc[dt] = value
+        if(date > max(df.index)):
+            date_48 = date + timedelta(days=1)
+            for hour in range(24):
+                dt = date_48.replace(hour=hour, minute=0, second=0, microsecond=0)
+                # Get the price from the day before at this hour
+                day_before = dt - timedelta(days=1)
+                value = df.loc[day_before]
+                # Append the new row to the series
+                df.loc[dt] = value
+            date_48 = date + timedelta(days=2)
+            for hour in range(24):
+                dt = date_48.replace(hour=hour, minute=0, second=0, microsecond=0)
+                # Get the price from the day before at this hour
+                day_before = dt - timedelta(days=1)
+                value = df.loc[day_before]
+                # Append the new row to the series
+                df.loc[dt] = value
+                
+        range_hours = pd.date_range(start=date, freq="H", periods=48)
+        df = df.loc[range_hours]
         return df
     
-    
-    
 ###################################################################################################
-# recommendation agent ############################################################################
+# recommendation agents ###########################################################################
 ###################################################################################################    
 # The Original Recommendation Agent
 # ===============================================================================================
@@ -1553,7 +1582,6 @@ class Recommendation_Agent:
     # -------------------------------------------------------------------------------------------
     def electricity_prices_from_start_time(self, date):
         import pandas as pd
-        tomorrow = (pd.to_datetime(date) + pd.Timedelta(days=1)).strftime("%Y-%m-%d") 
 
         prices_48 = self.Price_Agent.return_day_ahead_prices(date)
         prices_from_start_time = pd.DataFrame()
@@ -1786,7 +1814,6 @@ class X_Recommendation_Agent:
     # -------------------------------------------------------------------------------------------
     def electricity_prices_from_start_time(self, date):
         import pandas as pd
-        tomorrow = (pd.to_datetime(date) + pd.Timedelta(days=1)).strftime("%Y-%m-%d") 
 
         prices_48 = self.Price_Agent.return_day_ahead_prices(date)
         prices_from_start_time = pd.DataFrame()
