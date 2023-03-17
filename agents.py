@@ -27,10 +27,10 @@ class Preparation_Agent:
 #installing dependencies
     import pandas as pd
     #uploading data and simple data wrangling
-    def __init__(self, dbfile, shiftable_devices):
+    def __init__(self, dbfile, shiftable_devices, trainig_days = 60):
         from helper_functions import Helper
         helper = Helper()
-        self.input = helper.export_sql(dbfile)
+        self.input = helper.export_sql(dbfile, trainig_days)
         self.shiftable_devices = shiftable_devices
 
     def unpacking_attributes(self, df):
@@ -45,6 +45,16 @@ class Preparation_Agent:
         result = pd.DataFrame( pd.concat([output,df2], axis = 1).drop('shared_attributes', axis = 1))
         result = result.dropna(axis = 1, thresh=int(0.95*(len(result.columns))))
         return result
+
+    def create_friendly_names(self, df):
+        trial = df.copy()
+        trial.attributes_id = trial.attributes_id.dropna()
+        trial.state= pd.to_numeric(trial['state'], errors='coerce').dropna()
+        w_data = trial[trial.unit_of_measurement.isin(['W'])]
+        w_data = trial[trial.entity_id.isin(self.shiftable_devices)]
+        friendly_names = w_data[['entity_id','friendly_name']]
+        friendly_name_map = friendly_names.drop_duplicates()
+        return(friendly_name_map)
 
     def access_shiftable_devices(self, df, attrs= 'all'):
         import pandas as pd
@@ -62,6 +72,7 @@ class Preparation_Agent:
             w_data_long = w_data[['entity_id','last_updated','state']]
             w_data_wide = pd.pivot(w_data_long,  index = ['last_updated'], columns = 'entity_id', values = 'state')
         result = w_data_wide.fillna(0).reset_index()
+        
         return(result)
     
     #basic preprocessing
@@ -264,6 +275,19 @@ class Preparation_Agent:
     
     #pipelines
     # -------------------------------------------------------------------------------------------
+    #pipeline friendly_names
+    def pipeline_friendly_names(self, df):
+        from helper_functions import Helper
+        import pandas as pd
+        helper = Helper()
+        df = df.copy()
+        import pandas as pd
+        output = pd.DataFrame()
+
+        df  = self.unpacking_attributes(self.input)
+        output = self.create_friendly_names(df)
+        return output
+    
     #pipeline load
     def pipeline_load(self, df, params):
         from helper_functions import Helper
@@ -1508,7 +1532,7 @@ class Activity_Agent:
 ###################################################################################################
 class Price_Agent(): 
 
-    def return_day_ahead_prices(self, date, timezone = 'Europe/Brussels'):
+    def return_day_ahead_prices(self, date, timezone = 'Europe/Brussels', country_code_entoe = 'DE_LU', api_entsoe = '6f67ccf4-edb3-4100-a850-969c73688627'):
         import pandas as pd
         from datetime import datetime, timedelta
         from entsoe import EntsoePandasClient
@@ -1520,8 +1544,8 @@ class Price_Agent():
         date = current_timezone.localize(date)
         start = (date - timedelta(days= 20)).normalize()
         end = (date + timedelta(days = 20)).normalize()
-        country_code = 'DE_LU'
-        client = EntsoePandasClient(api_key='6f67ccf4-edb3-4100-a850-969c73688627')
+        country_code = country_code_entoe
+        client = EntsoePandasClient(api_key=api_entsoe)
         df = client.query_day_ahead_prices(country_code = country_code, start = start, end = end)
         
         # handling problem with missing price data for more than 24 hours ahead
@@ -1576,12 +1600,13 @@ class Price_Agent():
 # ===============================================================================================
 class Recommendation_Agent:
     def __init__(
-        self, activity_input, usage_input, load_input, price_input, shiftable_devices, model_type = 'random forest'):
+        self, activity_input, usage_input, load_input, price_input, shiftable_devices, friendly_names, model_type = 'random forest'):
         self.activity_input = activity_input
         self.usage_input = usage_input
         self.load_input = load_input
         self.price_input = price_input
         self.shiftable_devices = shiftable_devices
+        self.friendly_names = friendly_names
         self.Activity_Agent = Activity_Agent(activity_input)
         # create dictionary with Usage_Agent for each device
         self.Usage_Agent = {
@@ -1684,11 +1709,13 @@ class Recommendation_Agent:
             no_recommend_flag_usage = 1
 
         tomorrow = (pd.to_datetime(date) + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+        friendly_name = self.friendly_names.loc[self.friendly_names['entity_id'] == device, 'friendly_name'].item()
 
         return {
             "recommendation_calculation_date": [date],
             "recommendation_date": [tomorrow],
             "device": [device],
+            "friendly_name": [friendly_name],
             "best_launch_hour": [best_hour],
             "no_recommend_flag_activity": [no_recommend_flag_activity],
             "no_recommend_flag_usage": [no_recommend_flag_usage],
@@ -1744,12 +1771,14 @@ class Recommendation_Agent:
         best_launch_hour = dict['best_launch_hour'][0]
         recommendation_date = recommendation_date.replace(hour=best_launch_hour)
         recommendation_date = recommendation_date.strftime(format = "%d.%m.%Y %H:%M")
-        device = dict['device'][0]
+        device = dict['friendly_name'][0]
         if (dict['no_recommend_flag_activity'][0]== 0 and dict['no_recommend_flag_usage'][0]==0) == True:
             return print('You have one recommendation for the following device: ' + str(device) + '\nPlease use it on ' + recommendation_date[0:10] + ' at '+ recommendation_date[11:]+'.')
 
     # pipeline function: create recommendations
     # -------------------------------------------------------------------------------------------
+# pipeline function: create recommendations
+# -------------------------------------------------------------------------------------------
     def pipeline(self, date, activity_prob_threshold, usage_prob_threshold, evaluation=False, weather_sel=False):
         import pandas as pd
 
@@ -1797,22 +1826,25 @@ class Recommendation_Agent:
             date_and_time_show = date_and_time.strftime(format = "%d.%m.%Y %H:%M")
             date_and_time_price = date_and_time.strftime(format = "%Y-%m-%d %H:%M:%S")
             price = price.filter(like=date_and_time_price, axis=0)['Price_at_H+0'].iloc[0]
-            output = print('You have a recommendation for the following device: ' + str(recommendations_table.device.iloc[i]) + '\n\nPlease use the device on the ' + date_and_time_show[0:10] + ' at ' + date_and_time_show[11:] + ' oclock because it costs you only ' + str(price) + ' €.\n')
+            output = print('You have a recommendation for the following device: ' + str(recommendations_table.friendly_name.iloc[i]) + '\n\nPlease use the device on the ' + date_and_time_show[0:10] + ' at ' + date_and_time_show[11:] + ' oclock because it costs you only ' + str(price) + ' €.\n')
             if (recommendations_table.no_recommend_flag_activity.iloc[i]==0 and recommendations_table.no_recommend_flag_usage.iloc[i]==0) == True:
                 return output
             else:
                 return
 
+
+
 # X_Recommendation Agent
 # ===============================================================================================
 class X_Recommendation_Agent:
     def __init__(
-        self, activity_input, usage_input, load_input, price_input, shiftable_devices, best_hour = None, model_type = 'random forest'):
+        self, activity_input, usage_input, load_input, price_input, shiftable_devices, friendly_names, best_hour = None, model_type = 'random forest'):
         self.activity_input = activity_input
         self.usage_input = usage_input
         self.load_input = load_input
         self.price_input = price_input
         self.shiftable_devices = shiftable_devices
+        self.friendly_names = friendly_names
         self.model_type = model_type
         self.Activity_Agent = Activity_Agent(activity_input)
         # create dicionnary with Usage_Agent for each device
@@ -1937,11 +1969,14 @@ class X_Recommendation_Agent:
         feature_importance_activity, feature_importance_usage, explainer_activity, explainer_usage, shap_values, shap_values_usage, X_test_activity, X_test_usage = explain.feature_importance()
 
         tomorrow = (pd.to_datetime(date) + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+        friendly_name = self.friendly_names.loc[self.friendly_names['entity_id'] == device, 'friendly_name'].item()
+
 
         return {
             "recommendation_calculation_date": [date],
             "recommendation_date": [tomorrow],
             "device": [device],
+            "friendly_name": [friendly_name],
             "best_launch_hour": [self.best_hour],
             "no_recommend_flag_activity": [no_recommend_flag_activity],
             "no_recommend_flag_usage": [no_recommend_flag_usage],
@@ -1968,7 +2003,7 @@ class X_Recommendation_Agent:
         best_launch_hour = dict['best_launch_hour'][0]
         recommendation_date = recommendation_date.replace(hour=best_launch_hour)
         recommendation_date = recommendation_date.strftime(format = "%d.%m.%Y %H:%M")
-        device = dict['device'][0]
+        device = dict['friendly_name'][0]
         if (dict['no_recommend_flag_activity'][0]== 0 and dict['no_recommend_flag_usage'][0]==0) == True:
             return print('You have one recommendation for the following device: ' + str(device) + '\nPlease use it on ' + recommendation_date[0:10] + ' at '+ recommendation_date[11:]+'.')
 
@@ -2087,7 +2122,7 @@ class X_Recommendation_Agent:
                     price_dif = price_rec / price_mean
                     price_savings_percentage = round((1 - price_dif) * 100, 2)
 
-                    output = print('You have a recommendation for the following device: ' + recommendations_table.device.iloc[i] + '\n\nPlease use the device on the ' + date_and_time_show[0:10] + ' at ' + date_and_time_show[11:] + " o'clock because it saves you " + str(price_savings_percentage) + ' % of costs compared to the mean of the day.\n')
+                    output = print('You have a recommendation for the following device: ' + recommendations_table.friendly_name.iloc[i] + '\n\nPlease use the device on the ' + date_and_time_show[0:10] + ' at ' + date_and_time_show[11:] + " o'clock because it saves you " + str(price_savings_percentage) + ' % of costs compared to the mean of the day.\n')
                     feature_importance_usage_device = recommendations_table['feature_importance_usage'].iloc[i]
                     explaination_usage = self.Explainability_Agent.explanation_from_feature_importance_usage(feature_importance_usage_device, date=date, diagnostics=self.diagnostics)
                     print(explaination_usage)
@@ -2102,7 +2137,7 @@ class X_Recommendation_Agent:
                         display(shap_plot_usage)
 
                 else:
-                    print('There is no recommendation for the device ' + recommendations_table.device.iloc[i] + ' .')
+                    print('There is no recommendation for the device ' + recommendations_table.friendly_name.iloc[i] + ' .')
 
             print(explaination_activity)
 

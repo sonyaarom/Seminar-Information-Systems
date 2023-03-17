@@ -136,12 +136,12 @@ class Helper:
         return legend_shiftable_devices
     
     
-    def export_sql(self, file):
+    def export_sql(self, file, number_days = 30):
         import sqlite3
         import pandas as pd  
         with sqlite3.connect(file) as con:
             cur = con.cursor()
-            cur.execute("SELECT * FROM states")
+            cur.execute("SELECT * FROM states WHERE last_updated > DATETIME('now', '-{} day')".format(number_days))
             states = cur.fetchall()
         from_states_db = []
         for result in states:
@@ -163,3 +163,4 @@ class Helper:
 
         output = pd.merge(states_df, state_attributes_df, how= "left", on = 'attributes_id')
         return output
+   
