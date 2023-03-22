@@ -116,13 +116,15 @@ class Helper:
         from os import walk
         import json
         import pandas as pd
+        import os
+        wd = os.getcwd()
         # get config files stored at the export path
         _, _, filenames = next(walk(EXPORT_PATH))
         config_files = [file for file in filenames if file.find('config.json') != -1]
 
         legend_shiftable_devices = pd.DataFrame()
         for config_file in config_files:
-            config = json.load(open(EXPORT_PATH+config_file, 'r'))
+            config = json.load(open(wd + '/' + EXPORT_PATH+config_file, 'r'))
             household_id = config['data']['household']
             devices = config['user_input']['shiftable_devices']
             i = 0
@@ -138,17 +140,21 @@ class Helper:
     
     def export_sql(self, file, number_days = 30):
         import sqlite3
-        import pandas as pd  
+        import pandas as pd 
+        from datetime import datetime
         with sqlite3.connect(file) as con:
             cur = con.cursor()
-            cur.execute("SELECT * FROM states WHERE last_updated > DATETIME('now', '-{} day')".format(number_days))
+            cur.execute("SELECT * FROM states")
             states = cur.fetchall()
         from_states_db = []
         for result in states:
             result = list(result)
             from_states_db.append(result)
-        columns = ["state_id","entity_id","state","attributes","event_id","last_changed","last_updated","old_state_id","attributes_id","context_id","context_user_id","context_parent_id","origin_idx"]
+        columns = list(map(lambda x: x[0], cur.description))
         states_df = pd.DataFrame(from_states_db, columns = columns)
+        states_df.last_updated_ts = pd.to_datetime(states_df.last_updated_ts, unit='s')
+        states_df = states_df[states_df.last_updated_ts > datetime.now() - pd.to_timedelta(str(number_days)+"day")]
+
 
         with sqlite3.connect(file) as con:
             cur = con.cursor()
@@ -158,7 +164,7 @@ class Helper:
         for result in state_attributes:
             result = list(result)
             from_state_attributes_db.append(result)
-        columns = ["attributes_id","hash","shared_attributes"]
+        columns = list(map(lambda x: x[0], cur.description))
         state_attributes_df = pd.DataFrame(from_state_attributes_db, columns = columns)
 
         output = pd.merge(states_df, state_attributes_df, how= "left", on = 'attributes_id')

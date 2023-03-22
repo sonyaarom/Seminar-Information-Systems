@@ -24,55 +24,76 @@ import shap as shap
 # preparation agent ###############################################################################
 ###################################################################################################
 class Preparation_Agent:
-#installing dependencies
     import pandas as pd
-    #uploading data and simple data wrangling
-    def __init__(self, dbfile, shiftable_devices, trainig_days = 60):
+    
+    def __init__(self, dbfile, shiftable_devices, activity_devices = [], training_days = 60):
         from helper_functions import Helper
         helper = Helper()
-        self.input = helper.export_sql(dbfile, trainig_days)
+        self.input = helper.export_sql(file = dbfile, number_days = training_days)
         self.shiftable_devices = shiftable_devices
+        self.activity_devices = activity_devices + shiftable_devices
+        self.training_days = training_days
 
     def unpacking_attributes(self, df):
         import pandas as pd
         output = df.copy()
-        output['shared_attributes']=output['shared_attributes'].apply(lambda x: x.replace('true','True'))
-        output['shared_attributes']=output['shared_attributes'].apply(lambda x: x.replace('false','False'))
-        output['shared_attributes']=output['shared_attributes'].apply(lambda x: x.replace('null','None'))
+        output['shared_attrs']=output['shared_attrs'].apply(lambda x: x.replace('true','True'))
+        output['shared_attrs']=output['shared_attrs'].apply(lambda x: x.replace('false','False'))
+        output['shared_attrs']=output['shared_attrs'].apply(lambda x: x.replace('null','None'))
 
-        output['shared_attributes']=output['shared_attributes'].apply(lambda dat: dict(eval(dat)))
-        df2 = pd.json_normalize(output['shared_attributes'])
-        result = pd.DataFrame( pd.concat([output,df2], axis = 1).drop('shared_attributes', axis = 1))
+        output['shared_attrs']=output['shared_attrs'].apply(lambda dat: dict(eval(dat)))
+        df2 = pd.json_normalize(output['shared_attrs'])
+        result = pd.DataFrame( pd.concat([output,df2], axis = 1).drop('shared_attrs', axis = 1))
         result = result.dropna(axis = 1, thresh=int(0.95*(len(result.columns))))
         return result
 
+    #updated
     def create_friendly_names(self, df):
+        from datetime import datetime
         trial = df.copy()
         trial.attributes_id = trial.attributes_id.dropna()
         trial.state= pd.to_numeric(trial['state'], errors='coerce').dropna()
         w_data = trial[trial.unit_of_measurement.isin(['W'])]
-        w_data = trial[trial.entity_id.isin(self.shiftable_devices)]
+        w_data = w_data[w_data.entity_id.isin(self.shiftable_devices)]
+        last_30_days = (datetime.now() - pd.Timedelta(days=30)).strftime("%Y-%m-%d")
+        w_data = w_data[(w_data['last_updated_ts'] > last_30_days)]
         friendly_names = w_data[['entity_id','friendly_name']]
         friendly_name_map = friendly_names.drop_duplicates()
         return(friendly_name_map)
+    
+    def access_activity_devices(self, df):
+        # data for watt devices
+        trial = df.copy()
+        trial.state= pd.to_numeric(trial['state'], errors='coerce').dropna()
+        w_data = trial[trial.unit_of_measurement.isin(['W']) & trial.entity_id.isin(self.activity_devices)]
+        w_data_long = w_data[['entity_id','last_updated_ts','state']]
+        w_data_wide = pd.pivot(w_data_long,  index = ['last_updated_ts'], columns = 'entity_id', values = 'state')
+        w_data_wide = w_data_wide.fillna(0).reset_index()
+        # data for state devices
+        trial = df.copy()
+        s_data = trial[trial.state == 'on']
+        s_data.state.loc[s_data.state == 'on'] = 1
+        s_data = s_data[trial.entity_id.isin(self.activity_devices)]
+        s_data_long = s_data[['entity_id','last_updated_ts','state']]
+        s_data_wide = pd.pivot(s_data_long,  index = ['last_updated_ts'], columns = 'entity_id', values = 'state')
+        s_data_wide = s_data_wide.fillna(0).reset_index()
+        
+        result = pd.merge(w_data_wide, s_data_wide, how='outer')
+        return(result)
 
     def access_shiftable_devices(self, df, attrs= 'all'):
         import pandas as pd
         trial = df.copy()
-        trial.attributes_id = trial.attributes_id.dropna()
         trial.state= pd.to_numeric(trial['state'], errors='coerce').dropna()
         if attrs == 'all':
-            w_data = trial[trial.unit_of_measurement.isin(['W'])]
-            w_data = trial[trial.entity_id.isin(self.shiftable_devices)]
-            w_data_long = w_data[['entity_id','last_updated','state']]
-            w_data_wide = pd.pivot(w_data_long,  index = ['last_updated'], columns = 'entity_id', values = 'state')
+            w_data = trial[trial.unit_of_measurement.isin(['W']) & trial.entity_id.isin(self.shiftable_devices)]
+            w_data_long = w_data[['entity_id','last_updated_ts','state']]
+            w_data_wide = pd.pivot(w_data_long,  index = ['last_updated_ts'], columns = 'entity_id', values = 'state')
         if attrs != 'all':
-            w_data = trial[trial.unit_of_measurement.isin(['W']) & trial.attributes_id.isin([attrs])]
-            w_data = trial[trial.entity_id.isin(self.shiftable_devices)]
-            w_data_long = w_data[['entity_id','last_updated','state']]
-            w_data_wide = pd.pivot(w_data_long,  index = ['last_updated'], columns = 'entity_id', values = 'state')
+            w_data = trial[trial.unit_of_measurement.isin(['W']) & trial.entity_id.isin(self.shiftable_devices)]
+            w_data_long = w_data[['entity_id','last_updated_ts','state']]
+            w_data_wide = pd.pivot(w_data_long,  index = ['last_updated_ts'], columns = 'entity_id', values = 'state')
         result = w_data_wide.fillna(0).reset_index()
-        
         return(result)
     
     #basic preprocessing
@@ -116,8 +137,8 @@ class Preparation_Agent:
         return output 
 
     def get_timespan(self, df, start, timedelta_params):
-        df.last_updated = pd.to_datetime(df.last_updated)
-        df = df.set_index('last_updated')
+        df.last_updated_ts = pd.to_datetime(df.last_updated_ts)
+        df = df.set_index('last_updated_ts')
         start = pd.to_datetime(start) if type(start) != type(pd.to_datetime('1970-01-01')) else start 
         end = start + pd.Timedelta(**timedelta_params)
         return df[start:end].reset_index()
@@ -146,9 +167,9 @@ class Preparation_Agent:
     def add_dummy_data_tomorrow(self, df):
 
         today = str(datetime.now())[:10]
-        last_updated = self.last_reported(df)
+        last_updated_ts = self.last_reported(df)
         tomorrow = (pd.to_datetime(today) + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
-        diff_days = self.days_between(last_updated, today)
+        diff_days = self.days_between(last_updated_ts, today)
         # determine how many hours we need to fill up (missing hours till new day + 23 for tomorrow, day of prediction)
         hours_to_fill = 24 - int(str(df.index.max())[11:13]) + 23 + (24 * diff_days)
 
@@ -172,11 +193,11 @@ class Preparation_Agent:
     # feature creation
     # -------------------------------------------------------------------------------------------
     def get_device_usage(self, df, device, threshold):
-        return (df.loc[:, device] > threshold).astype('int')
+        return (df.loc[:, device] >= threshold).astype('int')
 
     def get_activity(self, df, active_appliances, threshold):
         import pandas as pd
-        active = pd.DataFrame({appliance: df[appliance] > threshold for appliance in active_appliances})
+        active = pd.DataFrame({appliance: df[appliance] >= threshold for appliance in active_appliances})
         return active.apply(any, axis = 1).astype('int')
 
     def get_last_usage(self, series):
@@ -307,11 +328,11 @@ class Preparation_Agent:
         # Index(['state_id', 'old_state_id', 'attributes_id', 'origin_idx', 'hash'], dtype='object')
         scaled = df.copy()
 
-        df['last_updated'] = pd.to_datetime(df['last_updated'])
-        df = df.set_index('last_updated')
+        df['last_updated_ts'] = pd.to_datetime(df['last_updated_ts'])
+        df = df.set_index('last_updated_ts')
 
-        scaled['last_updated'] = pd.to_datetime(scaled['last_updated'])
-        scaled = scaled.set_index('last_updated')
+        scaled['last_updated_ts'] = pd.to_datetime(scaled['last_updated_ts'])
+        scaled = scaled.set_index('last_updated_ts')
 
         # aggregate
         df = helper.aggregate_load(df, **params['aggregate'])
@@ -347,10 +368,10 @@ class Preparation_Agent:
         # Index(['state_id', 'old_state_id', 'attributes_id', 'origin_idx', 'hash'], dtype='object')
         scaled = df.copy()
         
-        # df['last_updated'] = pd.to_datetime(df['last_updated'])
-        # df = df.set_index('last_updated')
-        scaled['last_updated'] = pd.to_datetime(scaled['last_updated'])
-        scaled = scaled.set_index('last_updated')
+        # df['last_updated_ts'] = pd.to_datetime(df['last_updated_ts'])
+        # df = df.set_index('last_updated_ts')
+        scaled['last_updated_ts'] = pd.to_datetime(scaled['last_updated_ts'])
+        scaled = scaled.set_index('last_updated_ts')
         
         # Aggregate to hour level
         scaled = helper.aggregate_load(scaled, **params['aggregate_hour'])
@@ -393,25 +414,25 @@ class Preparation_Agent:
         import pandas as pd
         output = pd.DataFrame()
 
-        df  = self.unpacking_attributes(self.input)
-        df = self.access_shiftable_devices(df)
+        df = self.unpacking_attributes(self.input)
+        df = self.access_activity_devices(df)
         # Data cleaning
         # df = self.truncate(df, **params['truncate'],)
         # df = self.scale(df, **params['scale'])
         # ignore scaling for now, we would just scale those variables, which does not make sense 
         # Index(['state_id', 'old_state_id', 'attributes_id', 'origin_idx', 'hash'], dtype='object')
 
-        df['last_updated'] = pd.to_datetime(df['last_updated'])
-        df = df.set_index('last_updated')
+        df['last_updated_ts'] = pd.to_datetime(df['last_updated_ts'])
+        df = df.set_index('last_updated_ts')
         # Aggregate to hour level
         df = helper.aggregate_load(df, **params['aggregate'])
-        
+
         # Add dummy data
         df = self.add_dummy_data_tomorrow(df)
 
         # Activity feature
         output['activity'] = self.get_activity(df, **params['activity'])
-        
+
         ## Time feature
         output = output.join(self.get_time_feature(df, **params['time']))
 
@@ -423,9 +444,8 @@ class Preparation_Agent:
 
         return output
 
-
 ###################################################################################################
-# usage agent       ###############################################################################
+# usage agent #####################################################################################
 ###################################################################################################
 class Usage_Agent:
     import pandas as pd
@@ -524,7 +544,7 @@ class Usage_Agent:
         cols = X.index
         for e in cols:
             if isinstance(X, pd.DataFrame):
-                if e in X.columns:
+                if e in X.index:
                     res += 1
             if isinstance(X, pd.Series):
                 if e in X.index:
@@ -554,22 +574,27 @@ class Usage_Agent:
         return sklearn.metrics.roc_auc_score(y_true, y_hat)
     
     def evaluate(
-            self, df, model_type, train_start = '', predict_start="2014-01-01", predict_end=-1, return_errors=False,
+            self, df, model_type, train_start='', predict_start="2022-12-28", predict_end=-1, return_errors=False,
             weather_sel=False, xai=False, **args
     ):
         import pandas as pd
         import numpy as np
         from tqdm import tqdm
+        from datetime import datetime
 
-        dates = pd.DataFrame(df.index)
-        dates = dates.set_index(df.index)["last_updated"]
+        dates = (
+            pd.DataFrame(df.index)
+            .set_index(df.index)["last_updated_ts"]
+            .apply(lambda date: str(date)[:10])
+            .drop_duplicates()
+            )
         predict_start = pd.to_datetime(predict_start)
         predict_end = (
             pd.to_datetime(dates.iloc[predict_end])
             if type(predict_end) == int
             else pd.to_datetime(predict_end)
-        )
-        dates = dates.loc[predict_start:predict_end]
+         )
+        dates = [i for i in dates if predict_start < datetime.strptime(i, '%Y-%m-%d') < predict_end]
         y_true = []
         y_hat_train = {}
         y_hat_test = []
@@ -623,7 +648,7 @@ class Usage_Agent:
             ################################
 
         if not xai:
-            for date in tqdm(dates.index):
+            for date in dates:
                 errors = {}
                 try:
                     X_train, y_train, X_test, y_test = self.train_test_split(
@@ -632,7 +657,7 @@ class Usage_Agent:
                     # fit model
                     model = self.fit(X_train, y_train, model_type, **args)
                     # predict
-                    y_hat_train.update({date: self.predict(model, X_train)})
+                    y_hat_train.update({date: self.predict(model, X_train.T)})
                     y_hat_test += list(self.predict(model, X_test))
                     # evaluate train data
                     auc_train_dict.update(
@@ -659,7 +684,7 @@ class Usage_Agent:
                     # fit model
                     model = self.fit(X_train, y_train, model_type)
                     # predict
-                    y_hat_train.update({date: self.predict(model, X_train)})
+                    y_hat_train.update({date: self.predict(model, X_train.T)})
                     y_hat_test += list(self.predict(model, X_test))
                     # evaluate train data
                     auc_train_dict.update(
@@ -750,12 +775,13 @@ class Usage_Agent:
         # Efficiency
         time_mean_lime = np.mean(xai_time_lime)
         time_mean_shap = np.mean(xai_time_shap)
-        print('Mean time nedded by appraoches: ' + str(time_mean_lime) + ' ' + str(time_mean_shap))
+        print('Mean time needed by appraoches: ' + str(time_mean_lime) + ' ' + str(time_mean_shap))
 
         if return_errors:
             return auc_train, auc_test, auc_train_dict, time_mean_lime, time_mean_shap, predictions_list, errors
         else:
             return auc_train, auc_test, auc_train_dict, time_mean_lime, time_mean_shap, predictions_list
+
         
     # pipeline function: predicting device usage
     # -------------------------------------------------------------------------------------------
@@ -954,7 +980,7 @@ class Load_Agent:
             )
         return true_loads
 
-    def evaluate(self, shiftable_devices, date, metric="mse", aggregate=True, evaluation=False):
+    def evaluate(self, shiftable_devices, date = '2023-01-01', metric="mse", aggregate=True, evaluation=False):
         from tqdm import tqdm
         import pandas as pd
         import numpy as np
@@ -971,26 +997,31 @@ class Load_Agent:
         if not evaluation:
             for device in shiftable_devices:
                 true_loads[device] = self.prove_start_end_date(true_loads[device], date)
-                scores[device] = true_loads[device].progress_apply(
-                    lambda row: metric(
-                        row.values,
-                        self.pipeline(
-                            self.input, str(row.name)[:10], [device]
-                        ).values.reshape(
-                            -1,
-                        ),
+            scores[device] = true_loads[device].progress_apply(
+                lambda row: metric(
+                    row.values,
+                    self.pipeline(
+                        self.input, str(row.name)[:10], [device]
+                    ).values.reshape(
+                        -1,
                     ),
+                ),
                     axis=1,
                 )
         else:
             for device in shiftable_devices:
-                true_loads[device] = self.prove_start_end_date(true_loads[device], date)
                 scores[device] = {}
                 for idx in tqdm(true_loads[device].index):
                     date = str(idx)[:10]
                     y_true = true_loads[device].loc[idx, :].values
                     try:
-                        y_hat = (df.loc[date][device].values.reshape(-1,))
+                        y_hat = (
+                            evaluation[date]
+                            .loc[device]
+                            .values.reshape(
+                                -1,
+                            )
+                        )
                     except KeyError:
                         try:
                             y_hat = self.pipeline(
@@ -1001,7 +1032,7 @@ class Load_Agent:
                         except:
                             y_hat = np.full(24, 0)
                     scores[device][idx] = metric(y_true, y_hat)
-                scores[device] = pd.Series(scores[device], dtype='float64')
+                scores[device] = pd.Series(scores[device])
 
         if aggregate:
             scores = {device: scores_df.mean() for device, scores_df in scores.items()}
@@ -1016,11 +1047,10 @@ class Load_Agent:
         df_hours = self.load_profile_cleaned(df_hours)
         loads = self.load_profile(df_hours, shiftable_devices)
         return loads
-    
-###################################################################################################
-# Activity agent ##################################################################################
-###################################################################################################  
 
+###################################################################################################
+# activity agent ##################################################################################
+###################################################################################################
 class Activity_Agent:
     def __init__(self, activity_input_df):
         self.input = activity_input_df
@@ -1212,7 +1242,7 @@ class Activity_Agent:
 
         dates = (
             pd.DataFrame(df.index)
-            .set_index(df.index)["last_updated"]
+            .set_index(df.index)["last_updated_ts"]
             .apply(lambda date: str(date)[:10])
             .drop_duplicates()
         )
@@ -1593,6 +1623,22 @@ class Price_Agent():
             df = df.loc[range_hours]
         return df
     
+    def get_history(self, start, end, timezone = 'Europe/Brussels', country_code_entoe = 'DE_LU', api_entsoe = '6f67ccf4-edb3-4100-a850-969c73688627'):
+        import pandas as pd
+        from datetime import datetime, timedelta
+        from entsoe import EntsoePandasClient
+        import pytz
+        start = pd.to_datetime(start,format= '%Y-%m-%d')
+        end = pd.to_datetime(end,format= '%Y-%m-%d')
+        # looking for tommorow prices
+        current_timezone = pytz.timezone(timezone)
+        start = current_timezone.localize(start)
+        end = current_timezone.localize(end)
+        country_code = country_code_entoe
+        client = EntsoePandasClient(api_key=api_entsoe)
+        df = client.query_day_ahead_prices(country_code = country_code, start = start, end = end)
+        return df
+    
 ###################################################################################################
 # recommendation agents ###########################################################################
 ###################################################################################################    
@@ -1700,7 +1746,7 @@ class Recommendation_Agent:
             usage_prob = self.Usage_Agent[device].pipeline(self.usage_input, date, self.model_type, split_params["train_start"])
         else:
             # get usage probs
-            name = ("usage_" + device.replace(" ", "_").replace("(", "").replace(")", "").lower())
+            name = ("usage_" + device.replace(".", "_").replace("(", "").replace(")", "").lower())
             usage_prob = evaluation[name][date]
 
 
@@ -1832,8 +1878,7 @@ class Recommendation_Agent:
             else:
                 return
 
-
-
+            
 # X_Recommendation Agent
 # ===============================================================================================
 class X_Recommendation_Agent:
@@ -1952,8 +1997,11 @@ class X_Recommendation_Agent:
                 self.usage_input, date,self.model_type, split_params["train_start"], weather_sel=False)
         else:
             # get usage probs
-            name = ("usage_" + device.replace(" ", "_").replace("(", "").replace(")", "").lower())
+            name = ("usage_" + device.replace(".", "_").replace("(", "").replace(")", "").lower())
             usage_prob = evaluation[name][date]
+            
+            usage_prob, X_train_usage, X_test_usage, model_usage = self.Usage_Agent[device].pipeline_xai(
+                self.usage_input, date,self.model_type, split_params["train_start"], weather_sel=False)
 
 
         no_recommend_flag_usage = 0
@@ -1961,12 +2009,9 @@ class X_Recommendation_Agent:
             no_recommend_flag_usage = 1
 
         self.Explainability_Agent = Explainability_Agent(model_activity, X_train_activity, X_test_activity, self.best_hour, model_usage,
-        X_train_usage, X_test_usage, model_type=self.model_type)
+                                                         X_train_usage, X_test_usage, model_type=self.model_type)
 
-        explain = Explainability_Agent(model_activity, X_train_activity, X_test_activity,
-                                       self.best_hour,model_usage,X_train_usage, X_test_usage,
-                                       model_type= self.model_type)
-        feature_importance_activity, feature_importance_usage, explainer_activity, explainer_usage, shap_values, shap_values_usage, X_test_activity, X_test_usage = explain.feature_importance()
+        feature_importance_activity, feature_importance_usage, explainer_activity, explainer_usage, shap_values, shap_values_usage, X_test_activity, X_test_usage = self.Explainability_Agent.feature_importance()
 
         tomorrow = (pd.to_datetime(date) + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
         friendly_name = self.friendly_names.loc[self.friendly_names['entity_id'] == device, 'friendly_name'].item()
@@ -2433,4 +2478,1130 @@ class Explainability_Agent:
 
         return explanation_sentence
 
+
+###################################################################################################
+# Evaluation agent ################################################################################
+###################################################################################################
+class Evaluation_Agent:
+    def __init__(self, dbfile, model_type, config, training_days = 360, load_data=True, load_files=None, weather_sel=False, xai = False):
+        import agents
+        from helper_functions import Helper
+        import pandas as pd
+
+        helper = Helper()
+
+        self.model_type = model_type
+        self.config = config
+        self.weather_sel = weather_sel
+        self.xai = xai
+        if load_data:
+            self.preparation = agents.Preparation_Agent(dbfile, config['user_input']['shiftable_devices'], config['user_input']['active_appliances'], training_days)
+        else:
+            self.preparation = agents.Preparation_Agent(None)
+
+        self.price = (
+            agents.Price_Agent()
+            if load_data
+            else None
+        )
+        self.friendly_names = self.preparation.pipeline_friendly_names(self.preparation.input)
+        self.start = str(min(self.preparation.input.last_updated_ts))[0:10]
+        self.end = str(max(self.preparation.input.last_updated_ts))[0:10]
+        for device in self.config["user_input"]["shiftable_devices"]:
+            name = ("usage_" + device.replace(".", "_").replace("(", "").replace(")", "").lower())
+            exec(f"self.{name} = None")
+        self.activity = None
+        self.load = None
+        self.recommendation = None
+        self.df = {}
+        self.output = {}
+        self.errors = {}
+        self.agent_scores = {}
+        self.agent_predictions_list_activity = {}
+        self.agent_predictions_list_usage = {}
+        self.cold_start_scores = {}
+        self.results = {}
+        self.cold_start_days = pd.DataFrame()
+        if load_files != None:
+            self.load_from_drive(load_files)
+
+
+    # helper: loading and storing intermediary results and further helper
+    # -------------------------------------------------------------------------------------------
+    def _load_object(self, filename):
+        import pickle
+        import json
+        import yaml
+
+        # using a command dict as a if-list
+        commands = {
+            "pkl": f"pickle.load(open('{filename}', 'rb'))",
+            "json": f"json.load(open('{filename}', 'r'))",
+            "yaml": f"yaml.load(open('{filename}', 'r'), Loader = yaml.Loader)",
+        }
+
+        *_, name, ftype = filename.split(".")
+        name = name[name.rfind("_") + 1:]
+        obj = eval(commands[ftype])
+        self[name] = obj
+
+    def load_from_drive(self, files):
+        files = [files] if type(files) != list else files
+        for filename in files:
+            self._load_object(filename)
+
+    def dump(self, EXPORT_PATH):
+        import json
+        import yaml
+        import pickle
+        import os
+
+        wd = os.getcwd()
+
+        # storing the current configuration
+        json.dump(self.config, open(wd + '/' + EXPORT_PATH + str(self.config["data"]["household"]) + '_' + str(self.config["activity"]["model_type"]) +'_'
+                                          + str(self.config["usage"]["model_type"]) + '_' + str(self.weather_sel) + "_config.json", "w"), indent=4)
+
+        # storing the prepared data
+        if self.df != {}:
+            pickle.dump(self.df, open(wd + '/' + EXPORT_PATH + str(self.config["data"]["household"]) + '_' + str(self.config["activity"]["model_type"]) +'_'
+                                         + str(self.config["usage"]["model_type"]) + '_' + str(self.weather_sel) + "_df.pkl", "wb"))
+
+        # storing the agents' output
+        if self.output != {}:
+            pickle.dump(self.output, open(wd + '/' + EXPORT_PATH + str(self.config["data"]["household"]) + '_' + str(self.config["activity"]["model_type"]) +'_'
+                                         + str(self.config["usage"]["model_type"]) + '_' + str(self.weather_sel) + "_output.pkl", "wb"))
+
+        # storing the results
+        if self.results != {}:
+            pickle.dump(self.results, open(wd + '/' + EXPORT_PATH + str(self.config["data"]["household"]) + '_' + str(self.config["activity"]["model_type"]) +'_'
+                                        + str(self.config["usage"]["model_type"]) + '_' + str(self.weather_sel) + "_results.pkl", "wb"))
+
+        # storing the results
+        if self.agent_scores != {}:
+            pickle.dump(self.agent_scores, open(wd + '/' + EXPORT_PATH + str(self.config["data"]["household"]) + '_' + str(self.config["activity"]["model_type"]) +'_'
+                                        + str(self.config["usage"]["model_type"]) + '_' + str(self.weather_sel) + "_scores.pkl", "wb"))
+
+        if self.agent_predictions_list_activity != {}:
+            pickle.dump(self.agent_predictions_list_activity, open(EXPORT_PATH + '/' + str(self.config["data"]["household"]) + '_' + str(self.config["activity"]["model_type"]) +'_'
+                                         + str(self.config["usage"]["model_type"]) + '_' + str(self.weather_sel) + "_predictions.pkl", "wb"))
+
+        if self.agent_predictions_list_usage != {}:
+            pickle.dump(self.agent_predictions_list_usage, open(wd + EXPORT_PATH + '/' + str(self.config["data"]["household"]) + '_' + str(self.config["activity"]["model_type"]) +'_'
+                                        + str(self.config["usage"]["model_type"]) + '_' + str(self.weather_sel) + "_predictions_usage.pkl", "wb"))
+
+    def __getitem__(self, item):
+        return eval(f"self.{item}")
+
+    def __setitem__(self, key, value):
+        exec(f"self.{key} = value")
+
+    def _format_time(self, seconds):
+        return "{:02.0f}".format(seconds // 60) + ":" + "{:02.0f}".format(seconds % 60)
+
+    def _get_agent_names(self):
+        devices = self.config["user_input"]["shiftable_devices"]
+        names = ["activity", "load"] + ["usage_"+ str(device).replace(".", "_").replace("(", "").replace(")", "").lower() for device in devices]
+        return names
+
+    # creating the default configuration
+    # -------------------------------------------------------------------------------------------
+    def get_default_config(self, agents):
+        if type(agents) != list:
+            agents = [agents]
+
+        agents = [agent.lower() for agent in agents]
+        for agent in agents:
+            exec(f"self._get_default_{agent}_config()")
+
+    def _get_default_preparation_config(self):
+        from copy import deepcopy
+
+        # preparation
+        self.config["preparation"] = {}
+        ## preparation: activity agent
+        self.config["preparation"]["activity"] = {
+            "truncate": {"features": "all", "factor": 1.5, "verbose": 0},
+            "scale": {"features": "all", "kind": "MinMax", "verbose": 0},
+            "aggregate": {"resample_param": "60T"},
+            "activity": {
+                "active_appliances": deepcopy(self.config["user_input"]["active_appliances"]),
+                "threshold": deepcopy(self.config["user_input"]["threshold"]),
+            },
+            "time": {"features": ["hour", "day_name"]},
+            "activity_lag": {"features": ["activity"], "lags": [24, 48, 72]},
+        }
+        # preparation: usage agent
+        self.config["preparation"]["usage"] = {
+            "truncate": {"features": "all", "factor": 1.5, "verbose": 0},
+            "scale": {"features": "all", "kind": "MinMax", "verbose": 0},
+            "activity": {
+                "active_appliances": deepcopy(self.config["user_input"]["shiftable_devices"]),
+                "threshold": deepcopy(self.config["user_input"]["threshold"]),
+            },
+            "aggregate_hour": {"resample_param": "60T"},
+            "aggregate_day": {"resample_param": "24H"},
+            "time": {"features": ["hour", "day_name"]},
+            "shiftable_devices": deepcopy(self.config["user_input"]["shiftable_devices"]),
+            "device": {"threshold": deepcopy(self.config["user_input"]["threshold"])},
+        }
+        # preparation: load agent
+        self.config["preparation"]["load"] = {
+            "truncate": {"features": "all", "factor": 1.5, "verbose": 0},
+            "scale": {"features": "all", "kind": "MinMax", "verbose": 0},
+            "aggregate": {"resample_param": "60T"},
+            "shiftable_devices": deepcopy(self.config["user_input"]["shiftable_devices"]),
+            "device": {"threshold": deepcopy(self.config["user_input"]["threshold"])},
+        }
+
+
+    def _get_default_activity_config(self):
+        from copy import deepcopy
+
+        if (self.activity == None):
+            self.init_agents()
+        self._get_dates()
+        self.config["activity"] = {
+            "model_type": self.model_type,
+            "split_params": {
+                "train_start": deepcopy(self.config["data"]["start_dates"]["activity"]),
+                "test_delta": {"days": 1, "seconds": -1},
+                "target": "activity",
+            },
+        }
+
+    def _get_default_load_config(self):
+        from copy import deepcopy
+
+        if (self.load == None):
+            self.init_agents()
+        self._get_dates()
+        self.config["load"] = {
+            "shiftable_devices": deepcopy(self.config["user_input"]["shiftable_devices"])
+        }
+
+    def _get_default_usage_config(self):
+        from copy import deepcopy
+
+        if (self.activity == None) | (self.load == None):
+            self.init_agents()
+        self._get_dates()
+        self.config["usage"] = {
+            "model_type":  self.model_type,
+            "train_start": deepcopy(self.config["data"]["start_dates"]["usage"]),
+        }
+        for device in self.config["user_input"]["shiftable_devices"]:
+            name = ("usage_" + device.replace(" ", "_").replace("(", "").replace(")", "").lower())
+            self.config[name] = self.config["usage"]
+            self.config["data"]["start_dates"][name] = self.config["data"]["start_dates"]["usage"]
+
+    # extracting the available dates in the data
+    def get_first_date(self, df):
+        import pandas as pd
+
+        first_data = df.index.to_series()[0]
+        return (first_data + pd.Timedelta("1D")).replace(hour=0, minute=0, second=0)
+
+    def get_last_date(self, df):
+        import pandas as pd
+
+        last_data = df.index.to_series()[-1]
+        return (last_data - pd.Timedelta("1D")).replace(hour=23, minute=59, second=59)
+
+    def get_min_start_date(self, df):
+        df = df.dropna()
+        return df.loc[df.index.hour == 0, :].index[0]
+
+    def _get_dates(self):
+        import numpy as np
+
+        # first and last date in the data
+        self.config["data"]["first_date"] = str(self.get_first_date(self.preparation.input.set_index('last_updated_ts')))[:10]
+        self.config["data"]["last_date"] = str(self.get_last_date(self.preparation.input.set_index('last_updated_ts')))[:10]
+        # start dates
+        start_dates = {}
+        for agent, data in self.df.items():
+            start_dates[agent] = self.get_min_start_date(data)
+        start_dates["combined"] = np.max(list(start_dates.values()))
+        self.config["data"]["start_dates"] = {
+            key: str(value)[:10] for key, value in start_dates.items()
+        }
+
+
+    # -------------------------------------------------------------------------------------------
+    def pipeline(self, agents, **kwargs):
+        # converting single agent to list
+        if type(agents) != list:
+            agents = [agents]
+
+        agents = [agent.lower() for agent in agents]
+
+        if 'preparation' in agents:
+            self._prepare(**kwargs)
+        if 'activity' in agents:
+            self._pipeline_activity_usage_load('activity', **kwargs)
+        if 'usage' in agents:
+            #usage_agents = ["usage_"+ device.replace(".", "_").replace("(", "").replace(")", "").lower() for device in self.config["user_input"]["shiftable_devices"]]
+            #for agent in usage_agents:
+            #    self._pipeline_activity_usage_load(agent, **kwargs)
+            self._pipeline_activity_usage_load('usage', **kwargs)
+        if 'load' in agents:
+            self._pipeline_activity_usage_load('load', **kwargs)
+        if 'recommendation' in agents:
+            self._get_recommendations(**kwargs)
+
+    def init_agents(self):
+        import agents
+
+        # initialize the agents
+        self.activity = agents.Activity_Agent(self.df["activity"])
+        self.load = agents.Load_Agent(self.df["load"])
+
+        # initialize usage agents for the shiftable devices: agent = usage_name
+        for device in self.config["user_input"]["shiftable_devices"]:
+            name = ("usage_" + device.replace(".", "_").replace("(", "").replace(")", "").lower())
+            exec(f'self.{name} = agents.Usage_Agent(self.df["usage"], "{device}")')
+            self.df[name] = self.df["usage"]
+
+        self.recommendation = agents.Recommendation_Agent(
+            self.df["activity"],
+            self.df["usage"],
+            self.df["load"],
+            self.price.get_history(self.start, self.end),
+            self.config["user_input"]["shiftable_devices"], 
+            self.friendly_names
+        )
+
+    def _prepare(self, agent="all"):
+        lines = {
+            "activity": 'self.df["activity"] = self.preparation.pipeline_activity(self.preparation.input, self.config["preparation"]["activity"])',
+            "usage": 'self.df["usage"] = self.preparation.pipeline_usage(self.preparation.input, self.config["preparation"]["usage"])',
+            "load": 'self.df["load"] ,_,_ = self.preparation.pipeline_load(self.preparation.input, self.config["preparation"]["load"])',
+        }
+        if agent == "all":
+            for agent in ["activity", "usage", "load"]:
+                exec(lines[agent])
+                print(f"[evaluation agent] Finished preparing the data for the {agent} agent.")
+        else:
+            exec(lines[agent])
+            print(f"[evaluation agent] Finished preparing the data for the {agent} agent.")
+
+    def _pipeline_activity_usage_load(self, agent, verbose=1):
+        import pandas as pd
+        from IPython.display import clear_output
+        import time
+
+        self.output[agent] = {}
+        self.errors[agent] = {}
+
+        if agent == 'usage':
+            for device in self.config["user_input"]["shiftable_devices"]:
+                        agent_usage = ("usage_" + device.replace(".", "_").replace("(", "").replace(")", "").lower())
+                        self.output[agent_usage] = {}
+
+        # init agents
+        if (self.activity == None) | (self.load == None):
+            self.init_agents()
+
+        # determining the dates
+        dates = self.df[agent].index.to_series()
+        start = pd.to_datetime(self.config["data"]["start_dates"][agent])
+        end = pd.to_datetime(self.config["data"]["last_date"]).replace(
+            hour=23, minute=59, second=59
+        )
+        dates = dates[(dates >= start) & (dates <= end)].resample("1D").count()
+        dates = [str(date)[:10] for date in list(dates.index)]
+
+        # pipeline funtion
+        start = time.time() if verbose >= 1 else None
+        for date in dates:
+            try:
+                if agent == 'usage':
+                    for device in self.config["user_input"]["shiftable_devices"]:
+                        agent_usage = ("usage_" + device.replace(".", "_").replace("(", "").replace(")", "").lower())
+                        self.output[agent_usage][date] = eval(f'self.{agent_usage}.pipeline(self.{agent_usage}.input, "{date}", **self.config["{agent}"])')
+                        if verbose >= 1:
+                            clear_output(wait=True)
+                            elapsed = time.time() - start
+                            remaining = (elapsed / (len(dates)) * (len(dates) - (dates.index(date) + 1)))
+                            print(f"agent:\t\t{agent_usage}")
+                            print(f"progress: \t{dates.index(date)+1}/{len(dates)}")
+                            print(f"time:\t\t[{self._format_time(elapsed)}<{self._format_time(remaining)}]\n")
+                            print(self.output[agent_usage][date])
+                else:
+                    self.output[agent][date] = eval(f'self.{agent}.pipeline(self.{agent}.input, "{date}", **self.config["{agent}"])')
+                    # verbose
+                    if verbose >= 1:
+                        clear_output(wait=True)
+                        elapsed = time.time() - start
+                        remaining = (elapsed / (len(dates)) * (len(dates) - (dates.index(date) + 1)))
+                        print(f"agent:\t\t{agent}")
+                        print(f"progress: \t{dates.index(date)+1}/{len(dates)}")
+                        print(f"time:\t\t[{self._format_time(elapsed)}<{self._format_time(remaining)}]\n")
+                        print(self.output[agent][date])
+            except Exception as e:
+                self.errors[agent][date] = type(e).__name__
+
+    def _get_recommendations(
+        self, activity_threshold, usage_threshold, dates: tuple = "all"
+    ):
+        import numpy as np
+        from IPython.display import clear_output
+
+        # determining dates
+        start = (
+            self.config["data"]["start_dates"]["combined"]
+            if dates == "all"
+            else dates[0]
+        )
+        end = self.config["data"]["last_date"] if dates == "all" else dates[1]
+        dates = np.arange(
+            np.datetime64(start),
+            np.datetime64(end) + np.timedelta64(1, "D"),
+            np.timedelta64(1, "D"),
+        )
+        dates = [str(date) for date in dates]
+
+        # creating recommendations
+        self.errors["recommendation"] = {}
+        self.output["recommendation"] = {}
+        for date in dates:
+            try:
+                self.output["recommendation"][date] = self.recommendation.pipeline(
+                    date, activity_threshold, usage_threshold, evaluation=self.output
+                )
+            except Exception as e:
+                self.errors["recommendation"][date] = e
+
+        # merging the recommendations into one dataframe
+        df = list(self.output["recommendation"].values())[0]
+
+        for idx in range(1, len(self.output["recommendation"].values())):
+            df = df.append(list(self.output["recommendation"].values())[idx])
+        df.set_index("recommendation_date", inplace=True)
+        self.output["recommendation"] = df
+        clear_output()
+
+    # individual agent scores
+    # -------------------------------------------------------------------------------------------
+    def get_agent_scores(self, xai=False, **args):
+        self.xai =xai
+        scores = {}
+        scores['activity_auc'] = None
+        scores['time_mean_lime_activity'] = {}
+        scores['time_mean_shap_activity'] = {}
+        scores['usage_auc'] = {}
+        scores['time_mean_lime_usage'] = {}
+        scores['time_mean_shap_usage'] = {}
+        scores['load_mse'] = {}
+
+        agents = self._get_agent_names()
+        for agent in agents:
+            agent_type = agent.split('_')[0]
+
+            if agent_type == 'activity':
+                print("Activity_Agent")
+                _, auc_test_activity, _, time_mean_lime_activity, time_mean_shap_activity, predictions_list_activity = self[agent].evaluate(self[agent].input, **self.config[agent], xai=self.xai, **args)
+                print(auc_test_activity)
+                scores['activity_auc'] = auc_test_activity
+                scores['time_mean_lime_activity'] = time_mean_lime_activity
+                scores['time_mean_shap_activity'] = time_mean_shap_activity
+
+            if agent_type == 'usage':
+                print("Usage_Agent")
+                _, auc_test_usage, _, time_mean_lime_usage, time_mean_shap_usage, predictions_list_usage = self[agent].evaluate(self[agent].input, **self.config[agent_type], xai=self.xai, **args)
+                print(auc_test_usage)
+                scores['usage_auc'][self[agent].device] = auc_test_usage
+                scores['time_mean_lime_usage'] = time_mean_lime_usage
+                scores['time_mean_shap_usage'] = time_mean_shap_usage
+
+            if agent_type == 'load':
+                print("Load_Agent")
+                try:
+                    scores['load_mse'] = self.load.evaluate(**self.config['load'], evaluation=self.output['load'])
+                    print(scores['load_mse'])
+                except KeyError:
+                    scores['load_mse'] = self.load.evaluate(**self.config['load'])
+        self.agent_scores = scores
+        self.agent_predictions_list_activity = predictions_list_activity
+        self.agent_predictions_list_usage = predictions_list_usage
+        return scores, predictions_list_activity, predictions_list_usage
+
+
+    def agent_scores_to_summary(self, scores='default'):
+        import pandas as pd
+
+        if scores == 'default':
+            scores = self.agent_scores
+
+        summary = {}
+        summary['activity_auc'] = pd.DataFrame()
+        summary['usage_auc'] = pd.DataFrame()
+        summary['load_mse'] = pd.DataFrame()
+
+        household_id = self.config['data']['household']
+        devices = self.config['user_input']['shiftable_devices']
+
+        # activity
+        summary['activity_auc'].loc[household_id, '-'] = scores['activity_auc']
+        # usage
+        i = 0
+        for device in devices:
+            summary['usage_auc'].loc[household_id, i] = scores['usage_auc'][device]
+            i += 1
+        # load
+        i = 0
+        for device in devices:
+            summary['load_mse'].loc[household_id, i] = scores['load_mse'][device]
+            i += 1
+
+        summary['activity_auc'].index.name = 'household'
+        summary['usage_auc'].index.name = 'household'
+        summary['load_mse'].index.name = 'household'
+        summary['usage_auc'].columns.name = 'device'
+        summary['load_mse'].columns.name = 'device'
+        return summary
+
+    def predictions_to_xai_metrics(self, predictions, activity_threshold= 0.5, usage_threshold= 0.5):
+        import numpy as np
+        import sklearn.metrics
+
+        y_true = np.array(predictions[0])
+        y_hat_test = np.array(predictions[1])
+        y_hat_lime = np.array(predictions[2])
+        y_hat_shap = np.array(predictions[3])
+
+        self.activity_threshold = activity_threshold
+        self.usage_threshold = usage_threshold
+
+        self.y_true = y_true
+        self.y_hat_test = y_hat_test
+        self.y_hat_lime = y_hat_lime
+        self.y_hat_shap = y_hat_shap
+
+        #turn y_hat test into binary
+        self.y_hat_test_bin = np.where(y_hat_test > activity_threshold, 1, 0)
+        self.y_hat_lime_bin = np.where(y_hat_lime > activity_threshold, 1, 0)
+        self.y_hat_shap_bin = np.where(y_hat_shap > activity_threshold, 1, 0)
+
+
+        xai_scores = {}
+        xai_scores['activity_lime_auc_true'] = None
+        xai_scores['activity_shap_auc_true'] = {}
+        xai_scores['activity_lime_auc_pred'] = {}
+        xai_scores['activity_shap_auc_pred'] = {}
+        xai_scores['activity_lime_MAE'] = {}
+        xai_scores['activity_shap_MAE'] = {}
+
+        # AUC of true - xai prediction
+        xai_scores['activity_lime_auc_true'] = sklearn.metrics.roc_auc_score(y_true[:len(y_hat_lime)], y_hat_lime)
+        xai_scores['activity_shap_auc_true'] = sklearn.metrics.roc_auc_score(y_true[:len(y_hat_shap)], y_hat_shap)
+
+        # AUC of predicted probabilities - xai prediction
+        xai_scores['activity_lime_auc_pred'] = sklearn.metrics.roc_auc_score(self.y_hat_test_bin[:len(y_hat_lime)], self.y_hat_lime_bin)
+        xai_scores['activity_shap_auc_pred'] = sklearn.metrics.roc_auc_score(self.y_hat_test_bin[:len(y_hat_shap)], self.y_hat_shap_bin)
+
+        # MAE
+        MAE_SHAP = []
+        zip_object = zip(self.y_hat_test[:len(y_hat_shap)],self.y_hat_shap)
+        for list1_i, list2_i in zip_object:
+            MAE_SHAP.append(abs(list1_i - list2_i))
+
+        MAE_LIME = []
+        zip_object = zip(self.y_hat_test[:len(y_hat_lime)], self.y_hat_lime)
+        for list1_i, list2_i in zip_object:
+            MAE_LIME.append(abs(list1_i - list2_i))
+
+        xai_scores['activity_lime_MAE'] = np.mean(MAE_LIME)
+        xai_scores['activity_shap_MAE'] = np.mean(MAE_SHAP)
+
+        self.xai_scores = xai_scores
+        return xai_scores
+
+
+    def predictions_to_xai_metrics_usage(self, predictions, activity_threshold= 0.5, usage_threshold= 0.5):
+        import numpy as np
+        import sklearn.metrics
+
+        y_true = np.array(predictions[0])
+        y_hat_test = np.array(predictions[1])
+        y_hat_lime = np.array(predictions[2])
+        y_hat_shap = np.array(predictions[3])
+
+        self.activity_threshold = activity_threshold
+        self.usage_threshold = usage_threshold
+
+        self.y_true = y_true
+        self.y_hat_test = y_hat_test
+        self.y_hat_lime = y_hat_lime
+        self.y_hat_shap = y_hat_shap
+
+        #turn y_hat test into binary
+        self.y_hat_test_bin = np.where(y_hat_test > usage_threshold, 1, 0)
+        self.y_hat_lime_bin = np.where(y_hat_lime > usage_threshold, 1, 0)
+        self.y_hat_shap_bin = np.where(y_hat_shap > usage_threshold, 1, 0)
+
+
+        xai_scores = {}
+        xai_scores['usage_lime_auc_true'] = None
+        xai_scores['usage_shap_auc_true'] = {}
+        xai_scores['usage_lime_auc_pred'] = {}
+        xai_scores['usage_shap_auc_pred'] = {}
+        xai_scores['usage_lime_MAE'] = {}
+        xai_scores['usage_shap_MAE'] = {}
+
+        # AUC of true - xai prediction
+        xai_scores['usage_lime_auc_true'] = sklearn.metrics.roc_auc_score(y_true[:len(y_hat_lime)], y_hat_lime)
+        xai_scores['usage_shap_auc_true'] = sklearn.metrics.roc_auc_score(y_true[:len(y_hat_shap)], y_hat_shap)
+
+        # AUC of predicted probabilities - xai prediction
+        xai_scores['usage_lime_auc_pred'] = sklearn.metrics.roc_auc_score(self.y_hat_test_bin[:len(y_hat_lime)], self.y_hat_lime_bin)
+        xai_scores['usage_shap_auc_pred'] = sklearn.metrics.roc_auc_score(self.y_hat_test_bin[:len(y_hat_shap)], self.y_hat_shap_bin)
+
+        # MAE
+
+        MAE_SHAP = []
+        zip_object = zip(self.y_hat_test[:len(y_hat_shap)], self.y_hat_shap)
+        for list1_i, list2_i in zip_object:
+            MAE_SHAP.append(abs(list1_i - list2_i))
+
+        MAE_LIME = []
+        zip_object = zip(self.y_hat_test[:len(y_hat_lime)], self.y_hat_lime)
+        for list1_i, list2_i in zip_object:
+            MAE_LIME.append(abs(list1_i - list2_i))
+
+        xai_scores['usage_lime_MAE'] = np.mean(MAE_LIME)
+        xai_scores['usage_shap_MAE'] = np.mean(MAE_SHAP)
+
+
+        self.xai_scores = xai_scores
+        return xai_scores
+
+    # cold start: predict on all data
+    # -------------------------------------------------------------------------------------------
+    def predict_all(self, agent, **kwargs):
+        agent_type = agent.split("_")[0]
+        return eval(f"self._predict_all_{agent_type}(agent, **kwargs)")
+
+    def _predict_all_load(self, agent, device):
+        y_hat = {
+            date: profiles.loc[device, :]
+            for date, profiles in self.output[agent].items()
+        }
+        return y_hat
+
+    def _predict_all_activity(self, agent):
+        return self._predict_all_activity_usage(agent)
+
+    def _predict_all_usage(self, agent):
+        import pandas as pd
+        import numpy as np
+
+        y_hat = {}
+        # intitializing the error dict
+        try:
+            self.errors["evaluation"]
+        except KeyError:
+            self.errors["evaluation"] = {}
+
+        try:
+            self.errors["evaluation"][agent]
+        except KeyError:
+            self.errors["evaluation"][agent] = {}
+
+        # determining the dates
+        dates = np.arange(
+            np.datetime64(self.config["data"]["start_dates"][agent]),
+            np.datetime64(self.config["data"]["last_date"]) + np.timedelta64(1, "D"),
+            np.timedelta64(1, "D"),
+        )
+        start = dates[0]
+        end = dates[-1] + pd.Timedelta(days=1, seconds=-1)
+
+        # creating X_test
+        X_test, _, _, _ = self[agent].train_test_split(
+            self[agent].input,
+            dates[-1] + np.timedelta64(1, "D"),
+            train_start=self.config["data"]["start_dates"][agent],
+        )
+
+        # creating predictions
+        for date in dates:
+            X_train, y_train, _, _ = self[agent].train_test_split(
+                self[agent].input,
+                date,
+                train_start=self.config["data"]["start_dates"][agent],
+            )
+            try:
+                model = self[agent].fit(X_train, y_train, self.model_type)
+                y_hat[date] = self[agent].predict(model, X_test.T)
+            except Exception as e:
+                self.errors["evaluation"][agent][date] = type(e).__name__
+        return y_hat
+
+    def _predict_all_activity_usage(self, agent):
+        import pandas as pd
+        import numpy as np
+
+        y_hat = {}
+        # intitializing the error dict
+        try:
+            self.errors["evaluation"]
+        except KeyError:
+            self.errors["evaluation"] = {}
+
+        try:
+            self.errors["evaluation"][agent]
+        except KeyError:
+            self.errors["evaluation"][agent] = {}
+
+        # determining the dates
+        dates = np.arange(
+            np.datetime64(self.config["data"]["start_dates"][agent]),
+            np.datetime64(self.config["data"]["last_date"]) + np.timedelta64(1, "D"),
+            np.timedelta64(1, "D"),
+        )
+        start = dates[0]
+        end = dates[-1] + pd.Timedelta(days=1, seconds=-1)
+
+        # creating X_test
+        X_test, _, _, _ = self[agent].train_test_split(
+            self[agent].input,
+            dates[-1] + np.timedelta64(1, "D"),
+            train_start=self.config["data"]["start_dates"][agent],
+        )
+
+        # creating predictions
+        for date in dates:
+            X_train, y_train, _, _ = self[agent].train_test_split(
+                self[agent].input,
+                date,
+                train_start=self.config["data"]["start_dates"][agent],
+            )
+            try:
+                model = self[agent].fit(X_train, y_train, self.model_type)
+                y_hat[date] = self[agent].predict(model, X_test)
+            except Exception as e:
+                self.errors["evaluation"][agent][date] = type(e).__name__
+        return y_hat
+
+    # cold start: calculate cold start scores
+    # -------------------------------------------------------------------------------------------
+    def get_cold_start_scores(self, fn: dict = "default"):
+        from IPython.display import clear_output
+
+        scores = {}
+        fn = {} if fn == "default" else fn
+
+        # activity-agent
+        scores["activity"] = self._get_cold_start_score("activity", fn=fn.get("activity", "default"))
+        clear_output()
+
+        for device in self.config["user_input"]["shiftable_devices"]:
+            name = device.replace(".", "_").replace("(", "").replace(")", "").lower()
+            # usage agent
+            scores["usage_" + name] = self._get_cold_start_score("usage_" + name, fn=fn.get("usage", "default"))
+            # load agent
+            scores["load_" + name] = self._get_cold_start_score("load", fn=fn.get("load", "default"), device=device)
+            clear_output()
+        self.cold_start_scores = scores
+
+    def _get_cold_start_score(self, agent, fn="default", **kwargs):
+        import sklearn.metrics
+        import numpy as np
+
+        agent_type = agent.split("_")[0]
+        # specifying the correct score function
+        fn_dict = {
+            "activity": f"self.{agent}.auc",
+            "usage": f"self.{agent}.auc",
+            "load": "sklearn.metrics.mean_squared_error",
+        }
+        fn = eval(fn_dict[agent_type]) if fn == "default" else fn
+
+        # specifying the correct y_true, y_hat
+        y_dict = {
+            "activity": "self[agent].train_test_split(self[agent].input, date=np.datetime64(self.config['data']['last_date'])+np.timedelta64(1, 'D'), train_start=self.config['data']['start_dates'][agent])",
+            "usage": "self[agent].train_test_split(self[agent].input, date=np.datetime64(self.config['data']['last_date'])+np.timedelta64(1, 'D'), train_start=self.config['data']['start_dates'][agent_type])",
+            "load": "list(self.output['load'].values())[-1].loc[kwargs['device'], :]",
+        }
+        y_true = eval(y_dict[agent_type])
+        y_true = y_true if agent_type == "load" else y_true[1]
+        y_hat = self.predict_all(agent, **kwargs)
+
+        # calculating the scores
+        scores = {}
+        for date, pred in y_hat.items():
+            scores[date] = fn(y_true, pred)
+        return scores
+
+    def cold_start_scores_to_df(self):
+        import pandas as pd
+        import numpy as np
+
+        scores_df = pd.DataFrame()
+        # convert dicts into dataframe
+        for key in self.cold_start_scores.keys():
+            for date, score in self.cold_start_scores[key].items():
+                scores_df.loc[str(date), key] = score
+
+        # sort the dataframe
+        cols = (
+            ["activity"]
+            + [col for col in scores_df if col.startswith("usage")]
+            + [col for col in scores_df if col.startswith("load")]
+        )
+        scores_df.index = scores_df.index.map(np.datetime64)
+        scores_df = scores_df[cols].sort_index()
+        return scores_df
+
+    def get_cold_start_days(self, tolerance_values):
+        import pandas as pd
+
+        self.cold_start_days = pd.DataFrame({"tolerance": []}).set_index("tolerance")
+        scores_df = self.cold_start_scores_to_df()
+        tolerance_fn = {
+            "activity": "scores_df[agent].max() * (1 - tolerance[agent_type])",
+            "usage": "scores_df[agent].max() * (1 - tolerance[agent_type])",
+            "load": "tolerance['load']",
+        }
+
+        # agent coldstart days
+        for tolerance in tolerance_values:
+            tolerance = {"activity": tolerance, "usage": tolerance, "load": tolerance}
+
+            for agent in scores_df.columns:
+                agent_type = agent.split("_")[0]
+
+                done = False
+                day = 0
+                while not done:
+                    day += 1
+                    tolerance_value = eval(tolerance_fn[agent_type])
+                    if agent_type == "load":
+                        done = all(scores_df[agent].values[day - 1:] < tolerance_value)
+                    else:
+                        done = all(scores_df[agent].values[day - 1:] > tolerance_value)
+                self.cold_start_days.loc[tolerance[agent_type], agent] = day
+        # framework cold start days
+        self.cold_start_days['framework'] = self.cold_start_days.max(axis=1)
+
+    def cold_start_to_summary(self, tolerance_values='all'):
+        import pandas as pd
+
+        if tolerance_values == 'all':
+            tolerance_values = list(self.cold_start_days.index)
+
+        household_id = self.config['data']['household']
+        devices = self.config['user_input']['shiftable_devices']
+
+        summary = {}
+        summary['activity'] = {}
+        summary['usage'] = {}
+        summary['load'] = {}
+        summary['framework'] = {}
+
+        # activity agent
+        summary['activity']['-'] = {}  # '-': placeholder for device
+        summary['activity']['-'][household_id] = self.cold_start_days['activity'][tolerance_values].astype(int).to_list()
+        # usage agent
+        i = 0
+        for device in devices:
+            name = 'usage_' + device.replace(".", "_").replace("(", "").replace(")", "").lower()
+            summary['usage'][i] = {}
+            summary['usage'][i][household_id] = self.cold_start_days[name][tolerance_values].astype(int).to_list()
+            i += 1
+
+        # load agent
+        i = 0
+        for device in devices:
+            name = 'load_' + device.replace(".", "_").replace("(", "").replace(")", "").lower()
+            summary['load'][i] = {}
+            summary['load'][i][household_id] = self.cold_start_days[name][tolerance_values].astype(int).to_list()
+            i += 1
+
+        # framework
+        summary['framework']['-'] = {}  # '-': placeholder for device
+        summary['framework']['-'][household_id] = self.cold_start_days['framework'][tolerance_values].astype(int).to_list()
+
+        # converting the format
+        for key, value in summary.items():
+            summary[key] = pd.DataFrame(value)
+            summary[key].columns.name = 'device'
+            summary[key].index.name = 'household'
+        return summary
+
+    # cold start: visualizations
+    # -------------------------------------------------------------------------------------------
+    def _plot_axs(self, axs, y, x=None, legend=None, **kwargs):
+        axs.plot(x, y) if x != None else axs.plot(y)
+        axs.set(**kwargs)
+        axs.legend(legend) if legend != None else None
+
+    def visualize_cold_start(self, metrics_name: dict, tolerance: dict = None, figsize=(18, 5)):
+        import matplotlib.pyplot as plt
+
+        scores_df = self.cold_start_scores_to_df()
+        fig, axs = plt.subplots(1, 3, figsize=figsize)
+
+        # activity
+        self._plot_axs(
+            axs[0],
+            x=range(1, scores_df.shape[0] + 1),
+            y=scores_df["activity"],
+            title=f"[activity] {metrics_name['activity']}",
+        )
+        legend = ['activity']
+        if tolerance != None:
+            tolerance_value = scores_df["activity"].max() * (1 - tolerance["activity"])
+            color = axs[0].lines[-1].get_color()
+            axs[0].plot([tolerance_value] * scores_df.shape[0], "--", c=color)
+            legend.append([f"tolerance@{tolerance['activity']}"])
+        axs[0].legend(legend)
+        axs[0].set_xlabel("days")
+
+        # usage
+        usage_agents = [agent for agent in scores_df.columns if agent.find("usage") != -1]
+        legend = []
+        for agent in usage_agents:
+            self._plot_axs(axs[1],
+                x=range(1, scores_df.shape[0] + 1),
+                y=scores_df[agent],
+                title=f"[usage] {metrics_name['usage']}",
+            )
+            legend += [agent]
+            if tolerance != None:
+                tolerance_value = scores_df[agent].max() * (1 - tolerance["usage"])
+                color = axs[1].lines[-1].get_color()
+                axs[1].plot([tolerance_value] * scores_df.shape[0], "--", c=color)
+                legend += [f"tolerance_{agent.replace('usage_', '')}@{tolerance['usage']}"]
+        axs[1].legend(legend)
+        axs[1].set_xlabel("days")
+
+        # load
+        load_agents = [agent for agent in scores_df.columns if agent.find("load") != -1]
+        legend = []
+        for agent in load_agents:
+            self._plot_axs(
+                axs[2],
+                x=range(1, scores_df.shape[0] + 1),
+                y=scores_df[agent],
+                title=f"[load] {metrics_name['load']}",
+            )
+            legend += [agent]
+        if tolerance != None:
+            axs[2].plot([tolerance["load"]] * scores_df.shape[0], "--", c="black")
+            legend += [f"tolerance@{tolerance['load']}"]
+        axs[2].legend(legend)
+        axs[2].set_xlabel("days")
+    
+    #############################################################################################
+    # not adjusted yet ##########################################################################
+    #############################################################################################
+    # evaluation: calculate costs per device run
+    # -------------------------------------------------------------------------------------------
+    def calculate_cost(self, date, hour, load):
+        import numpy as np
+
+        if np.isnan(hour):
+            return np.nan
+        else:
+            price_idx = self.price.input.index.values
+            prices = self.price.input.values
+
+            dt = np.datetime64(date) + np.timedelta64(int(hour), "h")
+            # getting the correct position for the load in the load array
+            i = np.where(price_idx == dt)[0][0]
+            i = np.where(price_idx == dt)[0][0]
+
+            # reshaping the load array and calculating the costs
+            before = np.zeros(i)
+            after = np.zeros(prices.shape[0] - load.shape[0] - before.shape[0])
+            load = np.hstack([before, load, after])
+            return np.dot(load, prices)
+
+    def _get_usage(self, device, date):
+        return self.df["usage"].loc[date, device + "_usage"]
+
+    def _get_activity(self, date, hour):
+        import numpy as np
+
+        if np.isnan(hour):
+            return np.nan
+        else:
+            dt = np.datetime64(date) + np.timedelta64(int(hour), "h")
+            return self.activity.input.loc[dt, "activity"]
+
+    def _get_starting_times(self, device):
+        import numpy as np
+
+        # extracts hours in which the device is turned on,
+        # conditional on that the device was turned off the hour before
+        times = self.df["load"][device].index.to_numpy()
+        hour = self.df["load"][device].values
+        before = np.insert(hour, 0, 0)[:-1]
+        return times[(before == 0) & (hour != 0)]
+
+    def _get_starting_hours(self, device, date):
+        import numpy as np
+        import pandas as pd
+
+        times = self._get_starting_times(device)
+        date = np.datetime64(date) if type(date) != np.datetime64 else date
+        times = times[(times >= date) & (times < date + np.timedelta64(1, "D"))]
+        hours = (
+            pd.Series(times).apply(lambda x: x.hour).to_numpy()
+            if times.shape[0] != 0
+            else np.nan
+        )
+        return hours
+
+    def _get_load(self, true_loads, device, date, hour):
+        import numpy as np
+
+        try:
+            dt = np.datetime64(date) + np.timedelta64(hour, "h")
+        # if hour == NaN, return zero load profile
+        except ValueError:
+            return np.zeros(24)
+        try:
+            return true_loads[device].loc[dt].values
+        except KeyError as ke:
+            # return a zero load profile if the datetime index was not found
+            if str(ke).split("(")[0] == "numpy.datetime64":
+                return np.zeros(24)
+            # in any other case raise the key error
+            else:
+                raise ke
+
+    # evaluation: performance metrics
+    # -------------------------------------------------------------------------------------------
+    def evaluate(self, activity_threshold, usage_threshold):
+        name = f"activity: {activity_threshold}; usage: {usage_threshold}"
+        self.pipeline('recommendation', activity_threshold=activity_threshold, usage_threshold=usage_threshold, dates='all')
+        self.results[name] = self._evaluate()
+
+    def _evaluate(self):
+        import numpy as np
+
+        df = self.output["recommendation"].copy()
+
+        # usage and activity target
+        df["usage_true"] = df.apply(lambda row: self._get_usage(row["device"], row.name), axis=1)
+        df["activity_true"] = df.apply(lambda row: self._get_activity(row.name, row["recommendation"]), axis=1)
+        df["acceptable"] = df["usage_true"] * df["activity_true"]
+
+        # starting times
+        df["starting_times"] = df.apply(
+            lambda row: self._get_starting_hours(row["device"], row.name), axis=1
+        )
+        df["relevant_start"] = abs(df["starting_times"] - df["recommendation"])
+        df.loc[df["starting_times"].notna(), "relevant_start"] = df[
+            df["starting_times"].notna()
+        ].apply(
+            lambda row: row["starting_times"][np.argmin(row["relevant_start"])], axis=1
+        )
+
+        # actual loads
+        true_loads = self.load.get_true_loads(self.config["user_input"]["shiftable_devices"])
+        df["load"] = df.apply(lambda row: self._get_load(true_loads, row["device"], row.name, row["relevant_start"]), axis=1)
+
+        # calculating costs
+        df["cost_no_recommendation"] = df.apply(lambda row: self.calculate_cost(row.name, row["relevant_start"], row["load"]), axis=1)
+        df["cost_recommendation"] = df.apply(lambda row: self.calculate_cost(row.name, row["recommendation"], row["load"]),axis=1)
+        df["savings"] = df["cost_no_recommendation"] - df["cost_recommendation"]
+        df["relative_savings"] = df["savings"] / df["cost_no_recommendation"]
+
+        return df[
+            [
+                "device",
+                "recommendation",
+                "acceptable",
+                "relevant_start",
+                "cost_no_recommendation",
+                "cost_recommendation",
+                "savings",
+                "relative_savings",
+            ]
+        ]
+
+    def _result_to_summary(self, result):
+        return {
+            "n_recommendations": result["recommendation"].count(),
+            "acceptable": result["acceptable"].mean(),
+            "total_savings": (result["acceptable"] * result["savings"]).sum(),
+            "relative_savings_mean": result["relative_savings"].mean(),
+            "relative_savings_median": result["relative_savings"].median(),
+        }
+
+    def results_to_summary(self):
+        import pandas as pd
+
+        summary = {
+            name: self._result_to_summary(result)
+            for name, result in self.results.items()
+        }
+        return pd.DataFrame.from_dict(summary, orient="index")
+
+    # evaluation: grid search and sensitivity
+    # -------------------------------------------------------------------------------------------
+    def grid_search(self, activity_thresholds, usage_thresholds):
+        import itertools
+        from tqdm import tqdm
+
+        # updating the config
+        try:
+            self.config['evaluation']
+        except:
+            self.config['evaluation'] = {}
+
+        self.config['evaluation']['grid_search'] = {}
+        self.config['evaluation']['grid_search']['activity_thresholds'] = list(activity_thresholds)
+        self.config['evaluation']['grid_search']['usage_thresholds'] = list(usage_thresholds)
+
+        # testing candidate thresholds
+        iterator = itertools.product(activity_thresholds, usage_thresholds)
+        for thresholds in tqdm(list(iterator)):
+            self.evaluate(thresholds[0], thresholds[1])
+
+    def get_sensitivity(self, target):
+        import pandas as pd
+
+        df = self.results_to_summary()
+        sensitivity = pd.DataFrame()
+        for threshold_name in df.index:
+            thresholds = threshold_name.split("; ")
+            activity_threshold, usage_threshold = [th.split(": ")[1] for th in thresholds]
+            sensitivity.loc[activity_threshold, usage_threshold] = df.loc[threshold_name, target]
+        # sort and name rows and columns
+        sensitivity = sensitivity.loc[sorted(sensitivity.index), :]
+        sensitivity = sensitivity.loc[:, sorted(sensitivity.columns)]
+        sensitivity.index.name = "activity_threshold"
+        sensitivity.columns.name = "usage_threshold"
+        return sensitivity
+
+    def get_optimal_thresholds(self):
+        df = self.results_to_summary()
+        result = df.sort_values(by='total_savings').iloc[-1, :]
+        thresholds = result.name.split('; ')
+        thresholds = [threshold.split(': ') for threshold in thresholds]
+        thresholds = {f"{threshold}_threshold": value for threshold, value in thresholds}
+        self.config['evaluation']['grid_search']['optimal_thresholds'] = thresholds
+        return thresholds
+
+    def thresholds_to_index(self, activity_threshold='optimal', usage_threshold='optimal'):
+        if activity_threshold == 'optimal':
+            activity_threshold = self.config['evaluation']['grid_search']['optimal_thresholds']['activity_threshold']
+        if usage_threshold == 'optimal':
+            usage_threshold = self.config['evaluation']['grid_search']['optimal_thresholds']['usage_threshold']
+        return f"activity: {activity_threshold}; usage: {usage_threshold}"
+
+    def optimal_result_to_summary(self):
+        import pandas as pd
+        optimal_thresholds = self.get_optimal_thresholds()
+        optimal_thresholds_index = self.thresholds_to_index()
+        result = self.results_to_summary().loc[optimal_thresholds_index, :]
+        result = result.append(pd.Series(optimal_thresholds))
+        result.name = self.config['data']['household']
+        return result
 
